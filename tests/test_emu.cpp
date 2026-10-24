@@ -159,7 +159,9 @@ void test_preemption_is_exact() {
     std::thread stopper([&] {
         while (hammer) {
             cpu.request_stop();
-            std::this_thread::sleep_for(std::chrono::microseconds(5));
+            // Spin rather than sleep: Windows sleeps at least a millisecond.
+            const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(5);
+            while (hammer && std::chrono::steady_clock::now() < until) std::this_thread::yield();
         }
     });
     int stops = 0;
