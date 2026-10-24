@@ -39,6 +39,15 @@ cmake --build build --config Release
 ctest --test-dir build -C Release
 ```
 
+## didj-run
+
+`didj-run` runs a program from the Didj's root filesystem headless, with the dumps mounted where the Didj mounts them. Writes go to a host directory (`--data`, default `./didj-data`).
+
+```sh
+didj-run --rootfs erootfs.jffs2 --os "Didj OS" --cart SNC -- /bin/ls -l /Cart/SNC
+didj-run --rootfs erootfs.jffs2 --strace -- /bin/busybox echo hello   # log every syscall
+```
+
 ## didjtool
 
 `didjtool` reads dumps directly, both FAT and JFFS2. You don't need to mount them.
@@ -59,8 +68,8 @@ didjtool coverage "Didj OS:/Base" SNC:/SNC   # imports that nothing provides
 
 1. **Done: skeleton and tools.** FAT12/16/32 reader, ELF dynamic-section reader, `didjtool`, CI on Linux and Windows. Every file in the OS and Sonic dumps matches LeapFrog's own `packagefiles.md5` checksums.
 2. **Done: system libraries.** A JFFS2 reader with a built-in inflate loads the original root filesystem. With it, every import from the OS partition and Sonic resolves.
-3. ARM CPU (Unicorn), ELF loader, Linux syscall emulation.
-4. `RealAppManager` running headless.
+3. **Done: user-mode Linux.** ARM926 CPU on Unicorn, ELF loader, a VFS over the dumps with host overlays for writes, about 150 syscalls, green threads with futexes, and signals. The original busybox runs (`ls`, `cat`, `sh`, `md5sum`), and `RealAppManager` loads all of its Brio and Lightning libraries.
+4. `RealAppManager` running headless (next: POSIX message queues and timers, Brio's event plumbing).
 5. Display, buttons and audio, which brings up the menu.
 6. OpenGL ES 1.x translation, which makes games playable.
 7. Compatibility pass across all cartridges, save data, packaging.
