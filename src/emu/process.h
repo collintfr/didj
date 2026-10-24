@@ -111,6 +111,8 @@ public:
 
     // Hook for device drivers and the front end: called each scheduler round.
     std::function<void()> on_idle;
+    // Handles svc instructions with an HLE immediate (see hle/stub_elf.h).
+    std::function<void(uint32_t imm)> on_hle_svc;
 
 private:
     friend class Syscalls;
@@ -146,6 +148,7 @@ private:
     std::map<int, Fd> fds_;
     std::string cwd_ = "/";
     uint32_t brk_start_ = 0, brk_ = 0;
+    uint32_t brk_mapped_ = 0;  // end of the pages mapped for the heap so far
     uint32_t umask_ = 022;
 
     std::list<std::unique_ptr<Thread>> threads_;

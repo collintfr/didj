@@ -115,7 +115,7 @@ private:
 
 class TextFile : public OpenFile {
 public:
-    explicit TextFile(std::string text) : text_(std::move(text)) {}
+    explicit TextFile(std::string text, uint64_t ino = 0) : text_(std::move(text)), ino_(ino) {}
     int64_t read(void* buf, size_t len) override {
         int64_t n = pread(buf, len, pos_);
         pos_ += uint64_t(n);
@@ -136,12 +136,20 @@ public:
     int fstat(StatInfo& st) override {
         st = StatInfo();
         st.mode = kS_IFREG | 0444;
-        st.size = 0;  // like procfs
+        if (ino_) {
+            // A file with an identity: the dynamic linker tells libraries apart by dev/ino.
+            st.dev = 0xd1d, st.ino = ino_;
+            st.size = int64_t(text_.size());
+            st.blocks = (text_.size() + 511) / 512;
+        } else {
+            st.size = 0;  // like procfs
+        }
         return 0;
     }
 
 private:
     std::string text_;
+    uint64_t ino_;
     uint64_t pos_ = 0;
 };
 
@@ -191,6 +199,10 @@ std::shared_ptr<OpenFile> make_stub_device(const std::string& path, uint32_t rde
 }
 
 std::shared_ptr<OpenFile> make_text_file(std::string text) { return std::make_shared<TextFile>(std::move(text)); }
+
+std::shared_ptr<OpenFile> make_memory_file(std::string contents, uint64_t ino) {
+    return std::make_shared<TextFile>(std::move(contents), ino);
+}
 
 void register_basic_devices(Vfs& vfs) {
     vfs.add_device(1, 3, device<NullDevice>(1, 3));

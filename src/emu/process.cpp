@@ -88,7 +88,7 @@ bool Process::exec(const std::string& path, const std::vector<std::string>& argv
     StartInfo start;
     if (!setup_stack(mem_, exe, dynamic ? &interp : nullptr, argv, envp, start, err)) return false;
 
-    brk_start_ = brk_ = uint32_t(page_up(exe.end));
+    brk_start_ = brk_ = brk_mapped_ = uint32_t(page_up(exe.end));
     if (fds_.empty())
         for (int fd = 0; fd < 3; ++fd) fds_[fd] = Fd{make_console(fd), false};
     auto t = std::make_unique<Thread>();

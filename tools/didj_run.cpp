@@ -26,6 +26,7 @@
 #include "emu/dev/input.h"
 #include "emu/dev/lf1000_display.h"
 #include "emu/dev/oss.h"
+#include "emu/hle/gles.h"
 #include "emu/process.h"
 #include "emu/vfs.h"
 #include "fs/filesystem.h"
@@ -38,7 +39,8 @@ namespace {
 int usage() {
     std::fprintf(stderr,
                  "usage: didj-run [--rootfs IMAGE] [--os IMAGE] [--cart IMAGE|NAME] [--data DIR] [--strace]\n"
-                 "                [--stub-devices] [--run-seconds N] [--screenshot FILE.png]\n"
+                 "                [--stub-devices] [--gl-trace] [--real-gles] [--run-seconds N] [--screenshot FILE.png]\n"
+                 "                [--gl-screenshot FILE.png]\n"
                  "                [--env NAME=VALUE]... [--cwd DIR] [-- PROGRAM [ARGS...]]\n"
                  "Images default to the didj-fetch directory (%s).\n",
                  didj::pkg::default_dump_dir().u8string().c_str());
@@ -85,8 +87,8 @@ std::string resolve_cart(const std::string& arg) {
 
 int main(int argc, char** argv) {
     std::string rootfs, os, cart, data = "didj-data", cwd = "/";
-    bool stub_devices = false;
-    std::string screenshot;
+    bool stub_devices = false, real_gles = false, gl_trace = false;
+    std::string screenshot, gl_screenshot;
     double run_seconds = 0;
     std::vector<std::string> env = {"PATH=/bin:/sbin:/usr/bin:/usr/sbin", "HOME=/", "TERM=vt100", "USER=root"};
     didj::emu::ProcessOptions opts;
@@ -112,8 +114,11 @@ int main(int argc, char** argv) {
         else if (a == "--env") env.push_back(next());
         else if (a == "--strace") opts.strace = true;
         else if (a == "--stub-devices") stub_devices = true;
+        else if (a == "--real-gles") real_gles = true;
+        else if (a == "--gl-trace") gl_trace = true;
         else if (a == "--slice-us") opts.slice_us = uint32_t(std::atoi(next().c_str()));
         else if (a == "--screenshot") screenshot = next();
+        else if (a == "--gl-screenshot") gl_screenshot = next();
         else if (a == "--run-seconds") run_seconds = std::atof(next().c_str());
         else return usage();
     }
@@ -148,11 +153,20 @@ int main(int argc, char** argv) {
     board.register_sysfs(vfs, !cart.empty());
     didj::emu::InputHub input;
     input.register_device(vfs);
+    input.set_switch(1, !cart.empty());  // the cartridge switch
     didj::emu::register_oss_device(vfs, std::make_shared<didj::emu::NullAudioOutput>());
     didj::emu::Lf1000Display display;
     display.register_devices(vfs);
 
     didj::emu::Process proc(vfs, opts);
+    // OpenGL ES runs on the host unless --real-gles asks for LeapFrog's own
+    // library, which needs the (unemulated) 3D core.
+    didj::emu::hle::GlesHle gles(proc, display);
+    gles.trace = gl_trace;
+    if (!real_gles) {
+        gles.install(vfs);
+        proc.on_hle_svc = [&gles](uint32_t imm) { gles.on_svc(imm); };
+    }
     std::string err;
     if (!proc.exec(args[0], args, env, &err)) {
         std::fprintf(stderr, "didj-run: %s\n", err.c_str());
@@ -173,6 +187,26 @@ int main(int argc, char** argv) {
         if (!didj::util::write_png(screenshot, didj::emu::Lf1000Display::kWidth, didj::emu::Lf1000Display::kHeight,
                                    px.data()))
             std::fprintf(stderr, "didj-run: cannot write %s\n", screenshot.c_str());
+    }
+    if (gl_trace) {
+        std::lock_guard<std::mutex> lock(display.mutex());
+        for (int l = 0; l < didj::emu::Lf1000Display::kLayers; ++l) {
+            const auto& y = display.layer(l);
+            std::fprintf(stderr, "[lf1000] layer%d %s%s addr %x fmt %x stride %u/%u pos t%d l%d r%d b%d\n", l,
+                         y.enabled ? "on" : "off", y.is3d ? " 3d" : "", y.address, y.format, y.hstride, y.vstride,
+                         y.top, y.left, y.right, y.bottom);
+        }
+    }
+    if (!gl_screenshot.empty()) {
+        // The OpenGL color buffer itself, before it reaches the display.
+        const auto& r = gles.raster();
+        std::vector<uint32_t> px(size_t(r.width()) * size_t(r.height()));
+        for (size_t k = 0; k < px.size(); ++k) {
+            uint32_t c = r.pixels()[k];
+            px[k] = (c & 0xff) << 16 | (c & 0xff00) | ((c >> 16) & 0xff);
+        }
+        if (!didj::util::write_png(gl_screenshot, uint32_t(r.width()), uint32_t(r.height()), px.data()))
+            std::fprintf(stderr, "didj-run: cannot write %s\n", gl_screenshot.c_str());
     }
     return status;
 }

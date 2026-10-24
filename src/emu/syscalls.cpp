@@ -7,6 +7,7 @@
 #include <deque>
 #include <map>
 
+#include "emu/hle/stub_elf.h"
 #include "emu/linux_abi.h"
 #include "emu/loader.h"
 #include "emu/mqueue.h"
@@ -164,6 +165,20 @@ const char* Syscalls::name(uint32_t nr) {
 
 void Syscalls::handle() {
     Cpu& cpu = p_.cpu();
+    // Calls into libraries implemented on the host trap with their own svc
+    // immediates; Linux system calls use svc #0.
+    if (p_.on_hle_svc && !(cpu.reg(kRegCPSR) & kCpsrThumb)) {
+        uint32_t insn = 0;
+        if (p_.mem().read_u32(cpu.reg(kRegPC) - 4, insn) && (insn & 0x0f000000) == 0x0f000000) {
+            const uint32_t imm = insn & 0xffffff;
+            if (imm >= hle::kHleSvcBase && imm <= hle::kHleSvcReturn) {
+                p_.on_hle_svc(imm);
+                if (p_.exited_ || p_.current().state != Thread::State::Runnable) cpu.request_stop();
+                else p_.preempt_if_needed();
+                return;
+            }
+        }
+    }
     Args a;
     for (int i = 0; i < 7; ++i) a[size_t(i)] = cpu.reg(i);
     const uint32_t nr = cpu.reg(7);
@@ -746,11 +761,15 @@ int64_t Syscalls::dispatch(uint32_t nr, const Args& a) {
         case NR_brk: {
             uint32_t want = a[0];
             if (want > p_.brk_ && want < kMmapBase) {
-                uint32_t old_end = uint32_t(page_up(p_.brk_)), new_end = uint32_t(page_up(want));
-                // Grow only into free space directly above the heap.
-                if (new_end > old_end && (mem.find_free(new_end - old_end, old_end) != old_end ||
-                                          !mem.map_fixed(old_end, new_end - old_end, "[heap]")))
-                    return p_.brk_;
+                // Pages stay mapped when the heap shrinks; grow past them only
+                // into free space directly above.
+                uint32_t old_end = p_.brk_mapped_, new_end = uint32_t(page_up(want));
+                if (new_end > old_end) {
+                    if (mem.find_free(new_end - old_end, old_end) != old_end ||
+                        !mem.map_fixed(old_end, new_end - old_end, "[heap]"))
+                        return p_.brk_;
+                    p_.brk_mapped_ = new_end;
+                }
                 p_.brk_ = want;
             } else if (want >= p_.brk_start_ && want < p_.brk_) {
                 p_.brk_ = want;  // shrinking keeps the pages; they are reused on growth

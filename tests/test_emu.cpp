@@ -8,7 +8,11 @@
 
 #include <unicorn/unicorn.h>
 
+#include "elf/dynamic.h"
 #include "emu/cpu.h"
+#include "emu/hle/gles.h"
+#include "emu/hle/raster.h"
+#include "emu/hle/stub_elf.h"
 #include "emu/memory.h"
 
 namespace {
@@ -209,6 +213,136 @@ void test_memory() {
     CHECK(mem.read_string(a, s) && s == "hello");
 }
 
+void test_stub_library() {
+    using namespace didj::emu::hle;
+    auto lib = build_stub_library("libtest.so", {"first", "second"}, {"callback"});
+    std::string err;
+    auto info = didj::elf::parse_dynamic(lib.image, &err);
+    CHECK(info.has_value());
+    if (!info) return;
+    CHECK(info->soname == "libtest.so");
+    CHECK(info->needed == std::vector<std::string>{"libc.so.0"});
+    CHECK(info->symbols.size() == 3);
+    if (info->symbols.size() == 3) {
+        CHECK(info->symbols[0].name == "callback" && !info->symbols[0].defined && info->symbols[0].weak);
+        CHECK(info->symbols[2].name == "second" && info->symbols[2].defined &&
+              info->symbols[2].value == lib.svc_offset(1) - 4);
+    }
+
+    // The real library has every export the guest uses; make sure they fit.
+    auto gles = build_stub_library("libopengles_lite.so", GlesHle::export_names(), {"a"});
+    auto gles_info = didj::elf::parse_dynamic(gles.image, &err);
+    CHECK(gles_info && gles_info->symbols.size() == GlesHle::export_names().size() + 1);
+
+    // Run "second" as the dynamic linker would leave it: the import table
+    // holds the callback's address. The host asks for callback(10, 20), which
+    // returns r0 + r1, and returns that plus one.
+    Cpu cpu;
+    GuestMemory mem(cpu.uc());
+    constexpr uint32_t kBase = 0x100000, kStack = 0x200000, kCallback = 0x300000;
+    CHECK(mem.map_fixed(kBase, uint32_t(page_up(lib.image.size())), "lib"));
+    CHECK(mem.map_fixed(kStack - kPageSize, kPageSize, "stack"));
+    CHECK(mem.map_fixed(kCallback, kPageSize, "code"));
+    mem.write(kBase, lib.image.data(), lib.image.size());
+    mem.write_u32(kBase + lib.import_offset, kCallback);
+    put_code(mem, kCallback, {0xe0800001, 0xe12fff1e});  // add r0, r0, r1; bx lr
+    CHECK(mem.map_fixed(kCode, kPageSize, "caller"));
+    put_code(mem, kCode, {0xeb000000 | (((kBase + lib.svc_offset(1) - 4) - (kCode + 8)) >> 2 & 0xffffff),  // bl second
+                          0xef000000});                                                                    // svc #0: done
+    int svcs = 0;
+    bool done = false;
+    uint32_t sp_at_svc = 0;
+    cpu.on_interrupt = [&](uint32_t) {
+        uint32_t insn = 0;
+        mem.read_u32(cpu.reg(kRegPC) - 4, insn);
+        const uint32_t imm = insn & 0xffffff;
+        ++svcs;
+        if (imm == kHleSvcBase + 1) {
+            sp_at_svc = cpu.reg(kRegSP);
+            cpu.set_reg(0, 10), cpu.set_reg(1, 20), cpu.set_reg(12, kCallback);
+        } else if (imm == kHleSvcReturn) {
+            CHECK(cpu.reg(kRegSP) == sp_at_svc);
+            cpu.set_reg(0, cpu.reg(0) + 1), cpu.set_reg(12, 0);
+        } else {
+            done = true;
+            cpu.request_stop();
+        }
+    };
+    cpu.set_reg(kRegSP, kStack);
+    cpu.set_reg(kRegPC, kCode);
+    cpu.run(0);
+    CHECK(done && svcs == 3);
+    CHECK(cpu.reg(0) == 31);
+    CHECK(cpu.reg(kRegSP) == kStack);
+    CHECK(sp_at_svc == kStack - 8);
+}
+
+void test_raster() {
+    using namespace didj::emu::hle;
+    Raster r(8, 8);
+    RasterState s;
+    s.vp_w = s.vp_h = s.sc_w = s.sc_h = 8;
+    const float red[4] = {1, 0, 0, 1};
+    r.clear(true, true, red, 1, s);
+    CHECK(r.pixel(0, 0) == 0xff0000ff && r.pixel(7, 7) == 0xff0000ff);
+
+    auto vert = [](float x, float y, float z, uint32_t rgba) {
+        Vertex v{};
+        v.pos[0] = x, v.pos[1] = y, v.pos[2] = z, v.pos[3] = 1;
+        for (int i = 0; i < 4; ++i) v.color[i] = float((rgba >> (8 * i)) & 0xff) / 255.0f;
+        return v;
+    };
+    // A green triangle over the lower-left half (GL's y is up; row 0 is the top).
+    r.triangle(vert(-1, -1, 0, 0xff00ff00), vert(1, -1, 0, 0xff00ff00), vert(-1, 1, 0, 0xff00ff00), s);
+    CHECK(r.pixel(0, 7) == 0xff00ff00);  // bottom left
+    CHECK(r.pixel(7, 0) == 0xff0000ff);  // top right is still red
+    // Back-facing (clockwise) triangles are culled when asked.
+    RasterState cull = s;
+    cull.cull = true;
+    r.triangle(vert(-1, -1, 0, 0xffff0000), vert(-1, 1, 0, 0xffff0000), vert(1, -1, 0, 0xffff0000), cull);
+    CHECK(r.pixel(0, 7) == 0xff00ff00);
+
+    // Depth test: a farther blue quad doesn't cover the nearer one.
+    RasterState d = s;
+    d.depth_test = true;
+    r.clear(true, true, red, 1, s);
+    auto quad = [&](float z, uint32_t c, const RasterState& st) {
+        r.triangle(vert(-1, -1, z, c), vert(1, -1, z, c), vert(1, 1, z, c), st);
+        r.triangle(vert(-1, -1, z, c), vert(1, 1, z, c), vert(-1, 1, z, c), st);
+    };
+    quad(0, 0xff00ff00, d);
+    quad(0.5f, 0xffff0000, d);
+    CHECK(r.pixel(3, 3) == 0xff00ff00);
+    quad(-0.5f, 0xffff0000, d);
+    CHECK(r.pixel(3, 3) == 0xffff0000);
+
+    // Texturing (nearest, replace) and blending.
+    Texture t;
+    t.width = t.height = 2;
+    t.texels = {0xff0000ff, 0xff00ff00, 0xffff0000, 0x80ffffff};  // red green / blue half-white
+    t.min_filter = t.mag_filter = 0x2600;
+    RasterState ts = s;
+    ts.texture = &t;
+    ts.tex_env = 0x1e01;  // GL_REPLACE
+    auto tvert = [&](float x, float y, float u, float v) {
+        Vertex o = vert(x, y, 0, 0xffffffff);
+        o.tex[0] = u, o.tex[1] = v;
+        return o;
+    };
+    r.triangle(tvert(-1, -1, 0, 0), tvert(1, -1, 1, 0), tvert(1, 1, 1, 1), ts);
+    r.triangle(tvert(-1, -1, 0, 0), tvert(1, 1, 1, 1), tvert(-1, 1, 0, 1), ts);
+    CHECK(r.pixel(0, 7) == 0xff0000ff);  // texel (0, 0) at the bottom left
+    CHECK(r.pixel(7, 7) == 0xff00ff00);
+    CHECK(r.pixel(0, 0) == 0xffff0000);
+    ts.blend = true;
+    ts.blend_src = 0x0302, ts.blend_dst = 0x0303;  // SRC_ALPHA, ONE_MINUS_SRC_ALPHA
+    r.clear(true, true, red, 1, s);
+    r.triangle(tvert(-1, -1, 0, 0), tvert(1, -1, 1, 0), tvert(1, 1, 1, 1), ts);
+    r.triangle(tvert(-1, -1, 0, 0), tvert(1, 1, 1, 1), tvert(-1, 1, 0, 1), ts);
+    const uint32_t mixed = r.pixel(7, 0);  // half white over red
+    CHECK((mixed & 0xff) == 0xff && ((mixed >> 8) & 0xff) >= 0x7e && ((mixed >> 8) & 0xff) <= 0x81);
+}
+
 }  // namespace
 
 int main() {
@@ -218,6 +352,8 @@ int main() {
     // Each run catches a broken build about half the time; repeat.
     for (int i = 0; i < 8; ++i) test_preemption_is_exact();
     test_memory();
+    test_stub_library();
+    test_raster();
     if (g_failures) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);
         return 1;

@@ -51,6 +51,9 @@ if(DIDJ_BUILD_EMULATOR)
     src/emu/dev/input.cpp
     src/emu/dev/lf1000_display.cpp
     src/emu/dev/oss.cpp
+    src/emu/hle/gles.cpp
+    src/emu/hle/raster.cpp
+    src/emu/hle/stub_elf.cpp
     src/emu/loader.cpp
     src/emu/memory.cpp
     src/emu/process.cpp

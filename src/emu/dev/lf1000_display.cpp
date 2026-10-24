@@ -74,6 +74,17 @@ class LayerFile : public DeviceFile {
 public:
     LayerFile(Lf1000Display& d, int index) : DeviceFile(250, uint32_t(index)), d_(d), i_(index) {}
 
+    // The driver maps video memory at its physical address, like /dev/mem.
+    // Bit 29 selects the block (2D, 4096-byte line) view the video overlay
+    // uses; it is linear here.
+    int mmap(uint64_t offset, uint32_t len, uint8_t** host, std::shared_ptr<void>* owner) override {
+        uint8_t* p = d_.vram_ptr(uint32_t(offset) & ~0x20000000u, len);
+        if (!p) return -kEINVAL;
+        *host = p;
+        *owner = nullptr;
+        return 0;
+    }
+
     int ioctl(uint32_t cmd, uint32_t arg, GuestMemory& mem) override {
         std::lock_guard<std::mutex> lock(d_.mu_);
         Lf1000Display::Layer& l = d_.layers_[i_];
@@ -99,7 +110,16 @@ public:
             case 0x6d1b: return int(l.vstride);
             case 0x6d1c: return int(l.alpha);
             case 0x6d1d: return int(Lf1000Display::kLayerRegion);  // fbsize
+            case 0x6d20: return 0;  // dirty flag: settings already latched
             case 0x6d22: l.invisible = arg; return 0;
+            case 0x6d26: l.address_u = arg; return 0;  // overlay Cb plane
+            case 0x6d27: l.address_v = arg; return 0;  // overlay Cr plane
+            case 0x40046d1e: {                         // overlay scaler
+                int32_t p[4];
+                if (!mem.read(arg, p, sizeof p)) return -kEFAULT;
+                std::memcpy(l.scale, p, sizeof p);
+                return 0;
+            }
             case 0x40046d0d:    // set position {top, left, right, bottom}
             case 0x40046d24: {  // set invisible area
                 int32_t p[4];
@@ -310,6 +330,36 @@ void Lf1000Display::compose(uint32_t* out) {
             }
         }
     }
+}
+
+bool Lf1000Display::write_picture(uint32_t phys, uint32_t format, uint32_t hstride, uint32_t vstride,
+                                  const uint32_t* rgba, uint32_t width, uint32_t height) {
+    std::lock_guard<std::mutex> lock(mu_);
+    PixelLayout px = layout_for(format, hstride);
+    if (!hstride) hstride = uint32_t(px.bpp);
+    if (uint64_t(width) * hstride > vstride || px.luminance) return false;
+    const bool swap_rb = format & 0x8000;
+    for (uint32_t y = 0; y < height; ++y) {
+        uint8_t* row = vram_ptr(phys + y * vstride, width * hstride);
+        if (!row) return false;
+        for (uint32_t x = 0; x < width; ++x) {
+            uint32_t c = rgba[y * width + x];
+            uint32_t r = c & 0xff, g = (c >> 8) & 0xff, b = (c >> 16) & 0xff, a = c >> 24;
+            if (swap_rb) std::swap(r, b);
+            uint32_t v = 0;
+            int shift = 0;
+            auto put = [&](uint32_t ch, int bits) {
+                if (bits) v |= (ch >> (8 - bits)) << shift;
+                shift += bits;
+            };
+            put(b, px.b);
+            put(g, px.g);
+            put(r, px.r);
+            put(a, px.a);
+            std::memcpy(row + x * hstride, &v, size_t(px.bpp));
+        }
+    }
+    return true;
 }
 
 }  // namespace didj::emu

@@ -34,6 +34,10 @@ public:
         int32_t top = 0, left = 0, right = int32_t(kWidth) - 1, bottom = int32_t(kHeight) - 1;
         int32_t inv_top = 0, inv_left = 0, inv_right = 0, inv_bottom = 0;
         uint32_t alpha = 15, tpcolor = 0, invcolor = 0;
+        // Video overlay: Cb and Cr plane addresses, and the scaler's
+        // {source width, source height, output width, output height}.
+        uint32_t address_u = 0, address_v = 0;
+        int32_t scale[4] = {0, 0, 0, 0};
     };
 
     Lf1000Display();
@@ -44,6 +48,11 @@ public:
 
     // Host pointer for a physical address in video memory, or nullptr.
     uint8_t* vram_ptr(uint32_t phys, uint32_t len);
+
+    // Writes an RGBA8 picture (R in the low byte, row 0 at the top) into video
+    // memory at phys, in a layer pixel format. Returns false if it doesn't fit.
+    bool write_picture(uint32_t phys, uint32_t format, uint32_t hstride, uint32_t vstride, const uint32_t* rgba,
+                       uint32_t width, uint32_t height);
 
     std::mutex& mutex() { return mu_; }
     Layer& layer(int i) { return layers_[i]; }
@@ -60,7 +69,7 @@ private:
     std::mutex mu_;
     std::shared_ptr<uint8_t> vram_;
     Layer layers_[kLayers];
-    bool mlc_enabled_ = false;
+    bool mlc_enabled_ = true;  // the kernel enables the MLC at boot
     uint32_t background_ = 0x000000;
     uint32_t priority_ = 0;
     uint64_t frames_ = 0;
