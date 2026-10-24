@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Didj
+Comment=Play LeapFrog Didj games
+Exec=didj
+Icon=didj
+Categories=Game;Emulator;
+Terminal=false

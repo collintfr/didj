@@ -5,6 +5,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Link the MSVC runtime statically, here and in Unicorn and SDL, so didj.exe
+# runs on a Windows without the Visual C++ redistributable.
+set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 if(MSVC)
   add_compile_options(/W4 /permissive- /utf-8)
   add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
@@ -20,6 +25,7 @@ add_library(didjcore STATIC
   src/util/inflate.cpp
   src/util/md5.cpp
   src/util/png.cpp
+  src/pkg/fetch.cpp
   src/pkg/metainf.cpp
   src/pkg/paths.cpp
   src/pkg/zip.cpp
@@ -84,6 +90,13 @@ if(DIDJ_BUILD_EMULATOR)
       FetchContent_MakeAvailable(SDL2)
     endif()
     add_executable(didj tools/didj_main.cpp src/frontend/text.cpp)
+    if(WIN32)
+      # Started from Explorer, open just the window, no console.
+      set_target_properties(didj PROPERTIES WIN32_EXECUTABLE ON)
+      if(MSVC)
+        target_link_options(didj PRIVATE /ENTRY:mainCRTStartup)
+      endif()
+    endif()
     if(TARGET SDL2::SDL2)
       target_link_libraries(didj PRIVATE didjemu SDL2::SDL2)
     else()

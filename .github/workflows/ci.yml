@@ -22,3 +22,88 @@ jobs:
         run: cmake --build build --config Release --parallel
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+
+      # The Windows build links everything statically (see CMakeLists.txt):
+      # didj.exe runs on its own, without DLLs or the VC++ redistributable.
+      - name: Check didj.exe needs only system DLLs
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -find "VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          $deps = & $dumpbin /dependents build\Release\didj.exe | Where-Object { $_ -match '^\s+\S+\.dll$' } | ForEach-Object { $_.Trim() }
+          $deps
+          $bad = $deps | Where-Object { $_ -match '^(vcruntime|msvcp|ucrtbase|SDL2|unicorn)' -or $_ -match '^api-ms-win-crt' }
+          if ($bad) { Write-Error "didj.exe depends on: $bad"; exit 1 }
+      - name: Package for Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item build\Release\didj.exe, build\Release\didj-fetch.exe, build\Release\didj-run.exe dist\
+          Copy-Item packaging\windows\README.txt dist\
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: didj-windows-x64
+          path: dist/
+
+  # An AppImage built on the oldest supported Ubuntu, so its glibc requirement
+  # is low enough for most distributions. SDL is built from source and linked
+  # in; it loads X11, Wayland and the sound servers from the host.
+  appimage:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SDL's build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev \
+            libxi-dev libxss-dev libxinerama-dev libxkbcommon-dev libwayland-dev wayland-protocols \
+            libdecor-0-dev libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev libdrm-dev libgbm-dev \
+            libpulse-dev libasound2-dev libpipewire-0.3-dev libudev-dev libdbus-1-dev
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_DISABLE_FIND_PACKAGE_SDL2=ON -DBUILD_TESTING=OFF
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Package
+        run: |
+          curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          APPIMAGETOOL=./appimagetool scripts/package-appimage.sh build didj-x86_64.AppImage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: didj-linux-x86_64
+          path: didj-x86_64.AppImage
+
+  # Pushes to the default branch replace the files on the "latest" release,
+  # a download link that needs no GitHub account.
+  release:
+    needs: [build, appimage]
+    if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency: release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Update the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          (cd artifacts/didj-windows-x64 && zip -r ../../didj-windows-x64.zip .)
+          cp artifacts/didj-windows-x64/didj.exe didj.exe
+          cp artifacts/didj-linux-x86_64/didj-x86_64.AppImage didj-x86_64.AppImage
+          git tag -f latest "$GITHUB_SHA"
+          git push -f origin refs/tags/latest
+          notes="Built from ${GITHUB_SHA::7}. Windows: download didj.exe and run it. Linux: download didj-x86_64.AppImage, make it executable and run it. On first start, didj offers to download the Didj software and games from archive.org."
+          if gh release view latest >/dev/null 2>&1; then
+            gh release edit latest --title "Latest build" --notes "$notes"
+          else
+            gh release create latest --title "Latest build" --notes "$notes" --verify-tag
+          fi
+          gh release upload latest didj.exe didj-x86_64.AppImage didj-windows-x64.zip --clobber

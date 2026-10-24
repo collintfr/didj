@@ -4,6 +4,15 @@ An emulator for the **LeapFrog Didj** (2008) for Linux and Windows. It is meant 
 
 No Didj emulator exists yet. MAME's `leapfrog_didj` driver is an empty stub. This project is at an early stage. See [Status](#status).
 
+## Download and play
+
+Ready-to-run builds of the latest version are on the [latest release](https://github.com/collintfr/didj/releases/latest):
+
+- **Windows:** download `didj.exe` and double-click it. Nothing to install. If Windows says it "protected your PC", click *More info*, then *Run anyway*.
+- **Linux:** download `didj-x86_64.AppImage`, make it executable (`chmod +x didj-x86_64.AppImage`, or tick "Allow executing" in its file properties), and run it. If it complains about FUSE, run it with `--appimage-extract-and-run`.
+
+The first time, `didj` offers to download the Didj's software and games from archive.org (about 1.2 GB; a stopped download carries on next time). Then choose a game from the list. Every CI run also keeps these builds as artifacts.
+
 ## Approach
 
 The Didj runs a small Linux system on a LeapFrog LF1000 SoC (ARM926EJ-S). Each game is an ARM Linux shared library (`App.so`). It uses three layers below it:
@@ -69,7 +78,7 @@ didj              # choose a game from the cartridges you have
 didj --cart SNC   # or insert one directly
 ```
 
-`didj` opens a window on the Didj's home screen with the cartridge inserted. Without `--cart` it first shows a menu of the downloaded cartridges by name (it remembers the last one); `--no-cart` boots the home screen without one. JetPack Heroes is always there under My Games. Profiles and game saves are kept next to the dumps (`--data` to choose another place).
+`didj` opens a window on the Didj's home screen with the cartridge inserted. Without `--cart` it first shows a menu of the downloaded cartridges by name (it remembers the last one), with an entry that downloads the rest; if the dumps are not there at all, it offers to download them first. `--no-cart` boots the home screen without one. JetPack Heroes is always there under My Games. Profiles and game saves are kept next to the dumps (`--data` to choose another place).
 
 | Didj | Keyboard | Controller |
 | --- | --- | --- |
