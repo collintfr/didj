@@ -1,15 +1,21 @@
 // didj-run: runs a program from the Didj's root filesystem, headless.
 //
-//   didj-run --rootfs erootfs.jffs2 [--os "Didj OS"] [--cart SNC] [--data DIR]
-//            [--strace] [--stub-devices] [--env NAME=VALUE]... [--cwd DIR] -- PROGRAM [ARGS...]
+//   didj-run [--rootfs erootfs.jffs2] [--os "Didj OS"] [--cart SNC] [--data DIR]
+//            [--strace] [--stub-devices] [--env NAME=VALUE]... [--cwd DIR] [-- PROGRAM [ARGS...]]
+//
+// The images default to the ones didj-fetch downloads, and --cart also takes
+// a bare cartridge name (SNC) from that directory. With no PROGRAM it starts
+// the Didj's own launcher, RealAppManager, with the environment /etc/profile
+// gives it.
 //
 // --stub-devices answers ioctls on device nodes that have no driver yet and
 // logs them, which shows what a program expects from the hardware.
 //
 // The images are mounted read-only at /, /Didj and /Cart; writes land in
 // DIR (default ./didj-data). /tmp is a host directory under DIR.
-#include <cstdio>
+#include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -23,15 +29,19 @@
 #include "emu/process.h"
 #include "emu/vfs.h"
 #include "fs/filesystem.h"
+#include "pkg/dumps.h"
+#include "pkg/paths.h"
 #include "util/png.h"
 
 namespace {
 
 int usage() {
     std::fprintf(stderr,
-                 "usage: didj-run --rootfs IMAGE [--os IMAGE] [--cart IMAGE] [--data DIR] [--strace] [--stub-devices]\n"
-                 "                [--run-seconds N] [--screenshot FILE.png]\n"
-                 "                [--env NAME=VALUE]... [--cwd DIR] -- PROGRAM [ARGS...]\n");
+                 "usage: didj-run [--rootfs IMAGE] [--os IMAGE] [--cart IMAGE|NAME] [--data DIR] [--strace]\n"
+                 "                [--stub-devices] [--run-seconds N] [--screenshot FILE.png]\n"
+                 "                [--env NAME=VALUE]... [--cwd DIR] [-- PROGRAM [ARGS...]]\n"
+                 "Images default to the didj-fetch directory (%s).\n",
+                 didj::pkg::default_dump_dir().u8string().c_str());
     return 2;
 }
 
@@ -43,6 +53,32 @@ std::shared_ptr<didj::fs::FileSystem> open_or_die(const std::string& path) {
         std::exit(1);
     }
     return std::shared_ptr<didj::fs::FileSystem>(std::move(fs));
+}
+
+// A dump in the didj-fetch directory, or an empty string if it isn't there.
+std::string fetched(const std::string& name) {
+    auto dir = didj::pkg::default_dump_dir();
+    if (dir.empty()) return {};
+    auto p = dir / std::filesystem::u8path(name);
+    std::error_code ec;
+    return std::filesystem::is_regular_file(p, ec) ? p.u8string() : std::string();
+}
+
+// --cart accepts a path or the name of a fetched cartridge.
+std::string resolve_cart(const std::string& arg) {
+    std::error_code ec;
+    if (std::filesystem::exists(std::filesystem::u8path(arg), ec)) return arg;
+    for (const auto& d : didj::pkg::kDumps) {
+        if (!d.cartridge) continue;
+        std::string n = d.name;
+        bool same = n.size() == arg.size();
+        for (size_t k = 0; same && k < n.size(); ++k) same = std::toupper((unsigned char)arg[k]) == n[k];
+        if (same) {
+            std::string p = fetched(n);
+            if (!p.empty()) return p;
+        }
+    }
+    return arg;
 }
 
 }  // namespace
@@ -81,8 +117,24 @@ int main(int argc, char** argv) {
         else if (a == "--run-seconds") run_seconds = std::atof(next().c_str());
         else return usage();
     }
-    if (rootfs.empty() || i >= argc) return usage();
+    if (rootfs.empty()) rootfs = fetched(didj::pkg::kRootfsName);
+    if (os.empty()) os = fetched(didj::pkg::kOsName);
+    if (!cart.empty()) cart = resolve_cart(cart);
+    if (rootfs.empty()) {
+        std::fprintf(stderr, "didj-run: no root filesystem; run didj-fetch or pass --rootfs\n");
+        return usage();
+    }
     std::vector<std::string> args(argv + i, argv + argc);
+    if (args.empty()) {
+        if (os.empty()) {
+            std::fprintf(stderr, "didj-run: no Didj OS image; run didj-fetch or pass --os\n");
+            return usage();
+        }
+        args.push_back("/Didj/Base/bin/RealAppManager");
+        bool have_path = false;
+        for (const auto& e : env) have_path |= e.rfind("LD_LIBRARY_PATH=", 0) == 0;
+        if (!have_path) env.push_back("LD_LIBRARY_PATH=/Didj/Base/Brio/lib/:/Didj/Base/lib/");
+    }
 
     didj::emu::Vfs vfs;
     std::filesystem::path dir(data);

@@ -1,6 +1,6 @@
 # Dumps
 
-`didj` runs the Didj's original software, so it needs three kinds of dump. None of them are distributed with this project. All three are bare filesystem images, with no partition table.
+`didj` runs the Didj's original software, so it needs three kinds of dump. `didj-fetch` downloads them from archive.org and checks them against the sums below. All three are bare filesystem images, with no partition table.
 
 | Dump | Filesystem | Mounted on the Didj at | Contents |
 | --- | --- | --- | --- |

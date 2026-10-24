@@ -15,11 +15,19 @@ Rather than emulating the whole SoC (kernel, NAND, an undocumented 3D core), `di
 
 - The original ARM code runs unmodified: the game, LeapFrog's libraries, and the `RealAppManager` menu.
 - Linux system calls and the LF1000 device nodes (display layers, buttons, audio) are emulated on the host.
-- OpenGL ES 1.x calls are translated to host OpenGL.
+- OpenGL ES 1.x is reimplemented on the host: a generated stand-in for `libopengles_lite.so` hands every GL call to a software renderer.
 
-## What you need
+## Getting the dumps
 
-Your own dumps of the following. None of them are included in or distributed with this project.
+`didj` runs the Didj's original software, which has been preserved on archive.org ([didj-roms](https://archive.org/details/didj-roms) and [erootfs](https://archive.org/details/erootfs)). `didj-fetch` downloads it and checks every file against known-good MD5 sums:
+
+```sh
+didj-fetch            # root filesystem, Didj OS and all 15 cartridges (about 1.2 GB)
+didj-fetch os SNC     # just the system and Sonic
+didj-fetch --verify   # check what is already there
+```
+
+It needs `curl`, which comes with Windows 10 and later and with every Linux distribution. Files go to `%LOCALAPPDATA%\didj\dumps` on Windows and `~/.local/share/didj/dumps` on Linux, or to `$DIDJ_DUMPS` if it is set, and `didj-run` looks for them there. Running it again resumes an interrupted download.
 
 | File | What it is |
 | --- | --- |
@@ -27,7 +35,7 @@ Your own dumps of the following. None of them are included in or distributed wit
 | `Didj OS` | FAT16 image of the `/Didj` partition: the menu, Brio libraries, fonts, audio |
 | `SNC`, `FOF`, `IND`, … | FAT32 images of game cartridges |
 
-[docs/dumps.md](docs/dumps.md) lists known-good checksums and explains how to verify a set.
+[docs/dumps.md](docs/dumps.md) has the checksums and more about each image.
 
 ## Building
 
@@ -41,13 +49,12 @@ ctest --test-dir build -C Release
 
 ## didj-run
 
-`didj-run` runs a program from the Didj's root filesystem headless, with the dumps mounted where the Didj mounts them. Writes go to a host directory (`--data`, default `./didj-data`).
+`didj-run` runs the Didj's software headless, with the dumps mounted where the Didj mounts them. Writes go to a host directory (`--data`, default `./didj-data`). With no program it starts the Didj's own launcher, `RealAppManager`. `--cart` takes a fetched cartridge's name or a path to an image, and `--rootfs`/`--os` override the fetched images.
 
 ```sh
-didj-run --rootfs erootfs.jffs2 --os "Didj OS" --cart SNC -- /bin/ls -l /Cart/SNC
-didj-run --rootfs erootfs.jffs2 --strace -- /bin/busybox echo hello   # log every syscall
-didj-run --rootfs erootfs.jffs2 --os "Didj OS" --run-seconds 20 --screenshot out.png \
-         --env LD_LIBRARY_PATH=/Didj/Base/Brio/lib/:/Didj/Base/lib/ -- /Didj/Base/bin/RealAppManager
+didj-run --cart SNC --run-seconds 20 --screenshot out.png   # boot to the home screen
+didj-run --cart SNC -- /bin/ls -l /Cart/SNC                  # run any program on the Didj
+didj-run --strace -- /bin/busybox echo hello                 # log every syscall
 ```
 
 `--stub-devices` answers ioctls on device nodes that have no driver yet and logs them.

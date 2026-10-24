@@ -18,8 +18,10 @@ add_library(didjcore STATIC
   src/fs/fat.cpp
   src/fs/jffs2.cpp
   src/util/inflate.cpp
+  src/util/md5.cpp
   src/util/png.cpp
   src/pkg/metainf.cpp
+  src/pkg/paths.cpp
   src/elf/dynamic.cpp
 )
 target_include_directories(didjcore PUBLIC src)
@@ -64,6 +66,9 @@ endif()
 
 add_executable(didjtool tools/didjtool.cpp)
 target_link_libraries(didjtool PRIVATE didjcore)
+
+add_executable(didj-fetch tools/didj_fetch.cpp)
+target_link_libraries(didj-fetch PRIVATE didjcore)
 
 include(CTest)
 if(BUILD_TESTING)
