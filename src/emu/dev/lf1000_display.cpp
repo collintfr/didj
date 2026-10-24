@@ -312,8 +312,14 @@ void Lf1000Display::compose(uint32_t* out) {
     for (uint32_t i = 0; i < kWidth * kHeight; ++i) out[i] = bg;
     if (!mlc_enabled_) return;
 
-    // Layer 0 is frontmost on the MLC; draw back to front.
-    for (int li = kLayers - 1; li >= 0; --li) {
+    // RGB layers stack with layer 0 frontmost; the MLC priority places the
+    // video layer (2) among them: 1 behind layer 0, 2 behind layer 1, and
+    // 0 or 3 in front of both (software sets 3 while a movie plays).
+    // Draw back to front.
+    int order[kLayers] = {3, 1, 0, 2};  // video in front
+    if (priority_ == 1) order[0] = 3, order[1] = 1, order[2] = 2, order[3] = 0;
+    else if (priority_ == 2) order[0] = 3, order[1] = 2, order[2] = 1, order[3] = 0;
+    for (int li : order) {
         const Layer& l = layers_[li];
         if (!l.enabled || l.invisible) continue;
         if (li == 2 && (l.format & 0xfff) == 0) {

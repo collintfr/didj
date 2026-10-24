@@ -56,6 +56,12 @@ public:
 
     std::mutex& mutex() { return mu_; }
     Layer& layer(int i) { return layers_[i]; }
+    // MLC priority: where the video layer sits among the RGB layers.
+    uint32_t priority() const { return priority_; }
+    void set_priority(uint32_t p) {
+        std::lock_guard<std::mutex> lock(mu_);
+        priority_ = p;
+    }
 
     // Incremented whenever software marks the display dirty (a new frame).
     uint64_t frame_count() const { return frames_; }

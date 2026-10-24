@@ -10,6 +10,7 @@
 
 #include "elf/dynamic.h"
 #include "emu/cpu.h"
+#include "emu/dev/lf1000_display.h"
 #include "emu/hle/gles.h"
 #include "emu/hle/raster.h"
 #include "emu/hle/stub_elf.h"
@@ -345,6 +346,41 @@ void test_raster() {
     CHECK((mixed & 0xff) == 0xff && ((mixed >> 8) & 0xff) >= 0x7e && ((mixed >> 8) & 0xff) <= 0x81);
 }
 
+void test_video_priority() {
+    // An opaque red RGB565 layer 1 and a mid-grey video overlay (layer 2).
+    Lf1000Display d;
+    constexpr uint32_t kW = Lf1000Display::kWidth, kH = Lf1000Display::kHeight;
+    const uint32_t rgb = Lf1000Display::kVramBase + Lf1000Display::kLayerRegion;  // layer 1's region
+    const uint32_t yuv = Lf1000Display::kVramBase + 2 * Lf1000Display::kLayerRegion;
+    {
+        std::lock_guard<std::mutex> lock(d.mutex());
+        auto& l1 = d.layer(1);
+        l1.enabled = true, l1.address = rgb, l1.format = 0x4432, l1.hstride = 2, l1.vstride = kW * 2;
+        auto& v = d.layer(2);
+        v.enabled = true, v.format = 0, v.hstride = 1, v.vstride = 4096;
+        v.address = yuv | 0x20000000, v.address_u = (yuv + 2048) | 0x20000000, v.address_v = (yuv + 3072) | 0x20000000;
+        v.right = int32_t(kW), v.bottom = int32_t(kH);
+    }
+    uint16_t* p = reinterpret_cast<uint16_t*>(d.vram_ptr(rgb, kW * kH * 2));
+    for (uint32_t i = 0; i < kW * kH; ++i) p[i] = 0xf800;
+    for (uint32_t y = 0; y < kH; ++y) {
+        std::memset(d.vram_ptr(yuv + y * 4096, kW), 126, kW);                 // Y
+        std::memset(d.vram_ptr(yuv + y / 2 * 4096 + 2048, kW / 2), 128, kW / 2);  // Cb
+        std::memset(d.vram_ptr(yuv + y / 2 * 4096 + 3072, kW / 2), 128, kW / 2);  // Cr
+    }
+    std::vector<uint32_t> out(kW * kH);
+    auto at = [&](uint32_t mlc_priority) {
+        d.set_priority(mlc_priority);
+        d.compose(out.data());
+        return out[kW * (kH / 2) + kW / 2];
+    };
+    const uint32_t grey = 0x808080;  // Y 126 (studio range) is mid grey
+    CHECK(at(3) == grey);      // while a movie plays the video is in front
+    CHECK(at(0) == grey);
+    CHECK(at(1) == grey);      // behind layer 0 (off), in front of layer 1
+    CHECK(at(2) == 0xff0000);  // behind layer 1
+}
+
 }  // namespace
 
 int main() {
@@ -356,6 +392,7 @@ int main() {
     test_memory();
     test_stub_library();
     test_raster();
+    test_video_priority();
     if (g_failures) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);
         return 1;

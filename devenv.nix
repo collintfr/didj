@@ -3,7 +3,7 @@
 #   devenv shell        # enter it; then:
 #   didj-build          # configure and build (Release, in ./build)
 #   didj-dumps [ARGS]   # download and verify the dumps (didj-fetch ARGS)
-#   didj-play [ARGS]    # play, e.g. didj-play --cart SNC
+#   didj-play [ARGS]    # play: a game menu, or didj-play --cart SNC
 #   didj-test           # run the unit tests
 #
 # Or without entering the shell: devenv shell didj-play --cart SNC

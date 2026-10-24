@@ -107,7 +107,22 @@ int main(int argc, char** argv) {
     auto& input = machine.input();
     auto& gles = machine.gles();
     (void)cwd;
+    auto dump_layers = [&] {
+        std::lock_guard<std::mutex> lock(display.mutex());
+        std::fprintf(stderr, "[lf1000] priority %u\n", display.priority());
+        for (int l = 0; l < didj::emu::Lf1000Display::kLayers; ++l) {
+            const auto& y = display.layer(l);
+            std::fprintf(stderr,
+                         "[lf1000] layer%d %s%s addr %x fmt %x stride %u/%u pos t%d l%d r%d b%d alpha %u%s%s "
+                         "uv %x %x scale %d %d %d %d\n",
+                         l, y.enabled ? "on" : "off", y.is3d ? " 3d" : "", y.address, y.format, y.hstride, y.vstride,
+                         y.top, y.left, y.right, y.bottom, y.alpha, y.blend ? " blend" : "",
+                         y.transparent ? " transparent" : "", y.address_u, y.address_v, y.scale[0], y.scale[1],
+                         y.scale[2], y.scale[3]);
+        }
+    };
     auto take_screenshot = [&](const std::string& file) {
+        if (config.gl_trace) dump_layers();
         std::vector<uint32_t> px(didj::emu::Lf1000Display::kWidth * didj::emu::Lf1000Display::kHeight);
         display.compose(px.data());
         if (!didj::util::write_png(file, didj::emu::Lf1000Display::kWidth, didj::emu::Lf1000Display::kHeight,
@@ -157,15 +172,7 @@ int main(int argc, char** argv) {
     };
     int status = proc.run();
     if (!screenshot.empty()) take_screenshot(screenshot);
-    if (config.gl_trace) {
-        std::lock_guard<std::mutex> lock(display.mutex());
-        for (int l = 0; l < didj::emu::Lf1000Display::kLayers; ++l) {
-            const auto& y = display.layer(l);
-            std::fprintf(stderr, "[lf1000] layer%d %s%s addr %x fmt %x stride %u/%u pos t%d l%d r%d b%d\n", l,
-                         y.enabled ? "on" : "off", y.is3d ? " 3d" : "", y.address, y.format, y.hstride, y.vstride,
-                         y.top, y.left, y.right, y.bottom);
-        }
-    }
+    if (config.gl_trace) dump_layers();
     if (!gl_screenshot.empty()) {
         // The OpenGL color buffer itself, before it reaches the display.
         const auto& r = gles.raster();
