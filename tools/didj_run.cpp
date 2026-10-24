@@ -40,7 +40,8 @@ int usage() {
     std::fprintf(stderr,
                  "usage: didj-run [--rootfs IMAGE] [--os IMAGE] [--cart IMAGE|NAME] [--data DIR] [--strace]\n"
                  "                [--stub-devices] [--gl-trace] [--real-gles] [--run-seconds N] [--screenshot FILE.png]\n"
-                 "                [--gl-screenshot FILE.png]\n"
+                 "                [--gl-screenshot FILE.png] [--input T:BUTTON,...] [--screenshot-at T:FILE.png,...]\n"
+                 "Buttons: up down left right a b l r home hint pause brightness.\n"
                  "                [--env NAME=VALUE]... [--cwd DIR] [-- PROGRAM [ARGS...]]\n"
                  "Images default to the didj-fetch directory (%s).\n",
                  didj::pkg::default_dump_dir().u8string().c_str());
@@ -89,6 +90,12 @@ int main(int argc, char** argv) {
     std::string rootfs, os, cart, data = "didj-data", cwd = "/";
     bool stub_devices = false, real_gles = false, gl_trace = false;
     std::string screenshot, gl_screenshot;
+    // Scripted input and timed screenshots, in seconds from the start.
+    struct Timed {
+        double at;
+        std::string what;
+    };
+    std::vector<Timed> presses, shots;
     double run_seconds = 0;
     std::vector<std::string> env = {"PATH=/bin:/sbin:/usr/bin:/usr/sbin", "HOME=/", "TERM=vt100", "USER=root"};
     didj::emu::ProcessOptions opts;
@@ -119,6 +126,19 @@ int main(int argc, char** argv) {
         else if (a == "--slice-us") opts.slice_us = uint32_t(std::atoi(next().c_str()));
         else if (a == "--screenshot") screenshot = next();
         else if (a == "--gl-screenshot") gl_screenshot = next();
+        else if (a == "--input" || a == "--screenshot-at") {
+            // --input 3:a,4.5:right   --screenshot-at 10:menu.png
+            std::string spec = next();
+            for (size_t pos = 0; pos <= spec.size();) {
+                size_t end = spec.find(',', pos);
+                if (end == std::string::npos) end = spec.size();
+                std::string item = spec.substr(pos, end - pos);
+                size_t colon = item.find(':');
+                if (colon == std::string::npos) return usage();
+                (a == "--input" ? presses : shots).push_back({std::atof(item.c_str()), item.substr(colon + 1)});
+                pos = end + 1;
+            }
+        }
         else if (a == "--run-seconds") run_seconds = std::atof(next().c_str());
         else return usage();
     }
@@ -173,21 +193,56 @@ int main(int argc, char** argv) {
         return 1;
     }
     (void)cwd;
-    if (run_seconds > 0) {
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(run_seconds);
-        proc.on_idle = [&] {
-            if (std::chrono::steady_clock::now() < deadline) return;
-            proc.request_exit(0);
-        };
-    }
-    int status = proc.run();
-    if (!screenshot.empty()) {
+    auto take_screenshot = [&](const std::string& file) {
         std::vector<uint32_t> px(didj::emu::Lf1000Display::kWidth * didj::emu::Lf1000Display::kHeight);
         display.compose(px.data());
-        if (!didj::util::write_png(screenshot, didj::emu::Lf1000Display::kWidth, didj::emu::Lf1000Display::kHeight,
+        if (!didj::util::write_png(file, didj::emu::Lf1000Display::kWidth, didj::emu::Lf1000Display::kHeight,
                                    px.data()))
-            std::fprintf(stderr, "didj-run: cannot write %s\n", screenshot.c_str());
-    }
+            std::fprintf(stderr, "didj-run: cannot write %s\n", file.c_str());
+    };
+    // A scripted press holds the button for 150 ms.
+    struct Held {
+        double until;
+        didj::emu::DidjButton button;
+    };
+    std::vector<Held> held;
+    const auto start = std::chrono::steady_clock::now();
+    proc.on_idle = [&] {
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        for (auto it = presses.begin(); it != presses.end();) {
+            if (it->at > now) {
+                ++it;
+                continue;
+            }
+            didj::emu::DidjButton b;
+            if (didj::emu::button_from_name(it->what, b)) {
+                input.press(b, true);
+                held.push_back({now + 0.15, b});
+            } else {
+                std::fprintf(stderr, "didj-run: unknown button '%s'\n", it->what.c_str());
+            }
+            it = presses.erase(it);
+        }
+        for (auto it = held.begin(); it != held.end();) {
+            if (it->until > now) {
+                ++it;
+                continue;
+            }
+            input.press(it->button, false);
+            it = held.erase(it);
+        }
+        for (auto it = shots.begin(); it != shots.end();) {
+            if (it->at > now) {
+                ++it;
+                continue;
+            }
+            take_screenshot(it->what);
+            it = shots.erase(it);
+        }
+        if (run_seconds > 0 && now >= run_seconds) proc.request_exit(0);
+    };
+    int status = proc.run();
+    if (!screenshot.empty()) take_screenshot(screenshot);
     if (gl_trace) {
         std::lock_guard<std::mutex> lock(display.mutex());
         for (int l = 0; l < didj::emu::Lf1000Display::kLayers; ++l) {

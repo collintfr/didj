@@ -57,6 +57,15 @@ didj-run --cart SNC -- /bin/ls -l /Cart/SNC                  # run any program o
 didj-run --strace -- /bin/busybox echo hello                 # log every syscall
 ```
 
+Headless runs can be scripted: `--input` presses buttons at given times (in seconds) and `--screenshot-at` saves the screen. With a profile already set up, this starts Sonic and takes a picture in Emerald Hill Zone:
+
+```sh
+didj-run --cart SNC --run-seconds 70 --input 15:a,20:down,24:a,32:a,42:a,46:a,52:a,58:a \
+         --screenshot-at 66:sonic.png
+```
+
+Buttons are `up down left right a b l r home hint pause brightness`.
+
 `--stub-devices` answers ioctls on device nodes that have no driver yet and logs them.
 
 The build patches Unicorn (`cmake/patch_unicorn.cmake`): without it, stopping the CPU from another thread to time-slice threads can re-execute instructions and corrupt guest state.
@@ -84,5 +93,5 @@ didjtool coverage "Didj OS:/Base" SNC:/SNC   # imports that nothing provides
 3. **Done: user-mode Linux.** ARM926 CPU on Unicorn, ELF loader, a VFS over the dumps with host overlays for writes, about 150 syscalls, green threads with futexes, and signals. The original busybox runs (`ls`, `cat`, `sh`, `md5sum`), and `RealAppManager` loads all of its Brio and Lightning libraries.
 4. **Done: `RealAppManager` headless.** POSIX message queues and timers, AF_UNIX sockets, real-time priority scheduling, and the LF1000 devices: evdev buttons, OSS audio, board sysfs, and the MLC/layer/DPC/GPIO display model with `/dev/mem` video memory. `RealAppManager` brings up every Brio module, streams audio, and runs the BLT home screen.
 5. **Half done: display, input and audio.** The guest side works: LeapFrog's software drives the emulated display layers, button device and sound device. Still missing: a window, keyboard and gamepad input, and sound on the host.
-6. **In progress: OpenGL ES 1.x.** A generated replacement for `libopengles_lite.so` sends every GL and EGL call to a software renderer and hands finished frames to LeapFrog's display library as the original did. The BLT home screen renders correctly (`didj-run --cart SNC --run-seconds 15 --screenshot out.png`). Lighting, fog and some less common calls are not implemented yet; they are reported the first time a program uses them.
+6. **In progress: OpenGL ES 1.x.** A generated replacement for `libopengles_lite.so` sends every GL and EGL call to a software renderer and hands finished frames to LeapFrog's display library as the original did. The BLT home screen, its first-run setup and Sonic the Hedgehog's menus and gameplay render correctly, at full speed. Lighting, fog and some less common calls are not implemented yet; they are reported the first time a program uses them.
 7. Compatibility pass across all cartridges, save data, packaging.

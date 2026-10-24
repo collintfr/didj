@@ -12,6 +12,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include "emu/vfs.h"
@@ -22,6 +23,9 @@ enum class DidjButton { Up, Down, Left, Right, A, B, LeftShoulder, RightShoulder
 
 // Linux key codes the Didj's keyboard driver reports.
 uint16_t linux_keycode(DidjButton b);
+
+// "up", "a", "home", ... (lowercase); false if the name is unknown.
+bool button_from_name(const std::string& name, DidjButton& out);
 
 class InputHub {
 public:

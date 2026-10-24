@@ -23,6 +23,22 @@ int64_t now_us() {
 
 }  // namespace
 
+bool button_from_name(const std::string& name, DidjButton& out) {
+    static const struct {
+        const char* name;
+        DidjButton b;
+    } kNames[] = {{"up", DidjButton::Up},       {"down", DidjButton::Down},        {"left", DidjButton::Left},
+                  {"right", DidjButton::Right}, {"a", DidjButton::A},              {"b", DidjButton::B},
+                  {"l", DidjButton::LeftShoulder}, {"r", DidjButton::RightShoulder}, {"home", DidjButton::Home},
+                  {"hint", DidjButton::Hint},   {"pause", DidjButton::Pause},      {"brightness", DidjButton::Brightness}};
+    for (const auto& n : kNames)
+        if (name == n.name) {
+            out = n.b;
+            return true;
+        }
+    return false;
+}
+
 uint16_t linux_keycode(DidjButton b) {
     switch (b) {
         case DidjButton::Up: return 103;
