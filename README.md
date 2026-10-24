@@ -22,8 +22,8 @@ Rather than emulating the whole SoC (kernel, NAND, an undocumented 3D core), `di
 `didj` runs the Didj's original software, which has been preserved on archive.org ([didj-roms](https://archive.org/details/didj-roms) and [erootfs](https://archive.org/details/erootfs)). `didj-fetch` downloads it and checks every file against known-good MD5 sums:
 
 ```sh
-didj-fetch            # root filesystem, Didj OS and all 15 cartridges (about 1.2 GB)
-didj-fetch os SNC     # just the system and Sonic
+didj-fetch            # root filesystem, Didj OS, JetPack Heroes and all 15 cartridges (about 1.2 GB)
+didj-fetch os SNC     # just the system (with JetPack Heroes) and Sonic
 didj-fetch --verify   # check what is already there
 ```
 
@@ -34,6 +34,7 @@ It needs `curl`, which comes with Windows 10 and later and with every Linux dist
 | `erootfs.jffs2` | JFFS2 image of the Didj's root filesystem: uClibc, libstdc++ and the other system libraries |
 | `Didj OS` | FAT16 image of the `/Didj` partition: the menu, Brio libraries, fonts, audio |
 | `SNC`, `FOF`, `IND`, … | FAT32 images of game cartridges |
+| `POW.lfp` | JetPack Heroes, the game built into the Didj; installed automatically |
 
 [docs/dumps.md](docs/dumps.md) has the checksums and more about each image.
 
@@ -113,4 +114,4 @@ didjtool coverage "Didj OS:/Base" SNC:/SNC   # imports that nothing provides
 4. **Done: `RealAppManager` headless.** POSIX message queues and timers, AF_UNIX sockets, real-time priority scheduling, and the LF1000 devices: evdev buttons, OSS audio, board sysfs, and the MLC/layer/DPC/GPIO display model with `/dev/mem` video memory. `RealAppManager` brings up every Brio module, streams audio, and runs the BLT home screen.
 5. **Done: display, input and audio.** LeapFrog's software drives the emulated display layers, button device and sound device; `didj` shows the picture in a window, maps keyboard and game controllers to the buttons, and plays the sound.
 6. **In progress: OpenGL ES 1.x.** A generated replacement for `libopengles_lite.so` sends every GL and EGL call to a software renderer and hands finished frames to LeapFrog's display library as the original did. The BLT home screen, its first-run setup and Sonic the Hedgehog's menus and gameplay render correctly, at full speed. Lighting, fog and some less common calls are not implemented yet; they are reported the first time a program uses them.
-7. Compatibility pass across all cartridges, save data, packaging.
+7. **In progress: compatibility.** All 15 cartridges and JetPack Heroes boot from the home screen. Sonic, JetPack Heroes, Tinker Bell, Super Chicks and Didji Racing have been played into gameplay; the others reach their intros or menus. Video cutscenes play on the YUV overlay. Profiles and saves persist in the data directory. Still to do: lighting and fog in the renderer, a longer play-through of each game, and release packages.

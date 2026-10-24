@@ -389,6 +389,9 @@ void GlesHle::register_egl() {
         int next = -1;
         init_oal(c, 0, next);
         if (c.calling) return;
+        // A new context starts from the default GL state: BLT and the game it
+        // launches share this process, one context after the other.
+        reset_gl();
         c.ret(kContext);
     });
     def("eglCreateWindowSurface", [this](HleCall& c) {
@@ -560,6 +563,27 @@ void GlesHle::swap(HleCall& c) {
 
 // --- GL ---
 
+void GlesHle::reset_gl() {
+    error_ = GL_NO_ERROR;
+    matrix_mode_ = GL_MODELVIEW;
+    for (auto& st : stacks_) st.assign(1, identity());
+    vertex_ = color_ = texcoord_ = normal_ = Array();
+    for (int i = 0; i < 4; ++i) cur_color_[i] = 1;
+    cur_tex_[0] = cur_tex_[1] = cur_tex_[2] = 0, cur_tex_[3] = 1;
+    buffers_.clear();
+    next_buffer_ = 1, array_buffer_ = element_buffer_ = 0;
+    textures_.clear();
+    crop_.clear();
+    next_texture_ = 1, texture_ = 0;
+    texture_2d_ = false;
+    unpack_alignment_ = 4;
+    state_ = RasterState();
+    state_.vp_w = state_.sc_w = int(win_w_);
+    state_.vp_h = state_.sc_h = int(win_h_);
+    for (float& v : clear_color_) v = 0;
+    clear_depth_ = 1;
+}
+
 void GlesHle::set_error(uint32_t e) {
     if (!error_) error_ = e;
 }
@@ -645,6 +669,7 @@ void GlesHle::draw(uint32_t mode, uint32_t count, const std::function<uint32_t(u
         float pos[4] = {0, 0, 0, 1};
         fetch(vertex_, idx, 4, pos, false);
         transform(mvp, pos, v[i].pos);
+
         float col[4] = {cur_color_[0], cur_color_[1], cur_color_[2], cur_color_[3]};
         if (color_.enabled) fetch(color_, idx, 4, col, true);
         std::memcpy(v[i].color, col, sizeof col);

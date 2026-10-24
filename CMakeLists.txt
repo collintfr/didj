@@ -22,6 +22,7 @@ add_library(didjcore STATIC
   src/util/png.cpp
   src/pkg/metainf.cpp
   src/pkg/paths.cpp
+  src/pkg/zip.cpp
   src/elf/dynamic.cpp
 )
 target_include_directories(didjcore PUBLIC src)

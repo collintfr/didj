@@ -12,7 +12,9 @@
 #include "fs/fat.h"
 #include "fs/jffs2.h"
 #include "pkg/metainf.h"
+#include "pkg/zip.h"
 #include "util/inflate.h"
+#include "util/md5.h"
 
 namespace {
 
@@ -503,6 +505,58 @@ void test_elf() {
     CHECK(!didj::elf::parse_dynamic(std::vector<uint8_t>(10), &err));
 }
 
+void test_md5() {
+    auto md5 = [](const std::string& s) {
+        didj::util::Md5 m;
+        m.update(s.data(), s.size());
+        return m.hex();
+    };
+    // RFC 1321 appendix A.5.
+    CHECK(md5("") == "d41d8cd98f00b204e9800998ecf8427e");
+    CHECK(md5("a") == "0cc175b9c0f1b6a831c399e269772661");
+    CHECK(md5("abc") == "900150983cd24fb0d6963f7d28e17f72");
+    CHECK(md5("message digest") == "f96b697d7cb7938d525a2f31aaf161d0");
+    CHECK(md5("abcdefghijklmnopqrstuvwxyz") == "c3fcd3d76192e4007dfb496cca67e13b");
+    CHECK(md5("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789") ==
+          "d174ab98d277d9f5a5611c2c9f419d9f");
+    const std::string digits =
+        "12345678901234567890123456789012345678901234567890123456789012345678901234567890";
+    CHECK(md5(digits) == "57edf4a22be3c955ac49da2e2107b67a");
+    // Split updates give the same digest.
+    didj::util::Md5 m;
+    for (char c : digits) m.update(&c, 1);
+    CHECK(m.hex() == "57edf4a22be3c955ac49da2e2107b67a");
+}
+
+void test_zip() {
+    // One stored file, as LeapFrog's .lfp packages store most of theirs.
+    const std::string name = "POW/meta.inf", body = "Name=\"x\"\n";
+    const uint32_t crc = ~didj::util::crc32_raw(~0u, reinterpret_cast<const uint8_t*>(body.data()), body.size());
+    std::vector<uint8_t> z;
+    auto u16 = [&](uint32_t v) { z.push_back(uint8_t(v)), z.push_back(uint8_t(v >> 8)); };
+    auto u32 = [&](uint32_t v) { u16(v & 0xffff), u16(v >> 16); };
+    auto str = [&](const std::string& t) { z.insert(z.end(), t.begin(), t.end()); };
+    u32(0x04034b50), u16(10), u16(0), u16(0), u16(0), u16(0), u32(crc), u32(uint32_t(body.size())),
+        u32(uint32_t(body.size())), u16(uint32_t(name.size())), u16(0), str(name), str(body);
+    const uint32_t cd = uint32_t(z.size());
+    u32(0x02014b50), u16(20), u16(10), u16(0), u16(0), u16(0), u16(0), u32(crc), u32(uint32_t(body.size())),
+        u32(uint32_t(body.size())), u16(uint32_t(name.size())), u16(0), u16(0), u16(0), u16(0), u32(0), u32(0),
+        str(name);
+    const uint32_t cd_size = uint32_t(z.size()) - cd;
+    u32(0x06054b50), u16(0), u16(0), u16(1), u16(1), u32(cd_size), u32(cd), u16(0);
+
+    didj::pkg::ZipArchive zip;
+    std::string err;
+    CHECK(zip.open(z, &err));
+    CHECK(zip.entries().size() == 1);
+    if (zip.entries().size() != 1) return;
+    std::vector<uint8_t> out;
+    CHECK(zip.read(zip.entries()[0], out, &err) && std::string(out.begin(), out.end()) == body);
+    z[30 + name.size()] ^= 1;  // corrupt the data: the CRC check catches it
+    CHECK(zip.open(z, &err) && !zip.read(zip.entries()[0], out, &err));
+    CHECK(!zip.open(std::vector<uint8_t>(30), &err));
+}
+
 }  // namespace
 
 int main() {
@@ -514,6 +568,8 @@ int main() {
     test_jffs2();
     test_metainf();
     test_elf();
+    test_md5();
+    test_zip();
     if (g_failures) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);
         return 1;

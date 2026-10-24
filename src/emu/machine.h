@@ -23,6 +23,10 @@ struct MachineConfig {
     // a path or the name of a fetched cartridge ("SNC"); empty means none.
     std::string rootfs, os, cart;
     std::filesystem::path data = "didj-data";  // writes to the images land here
+    // .lfp game packages to install into /Didj/ProgramFiles (kept in data).
+    // JetPack Heroes, built into every Didj, is added when it was fetched.
+    std::vector<std::string> packages;
+    bool builtin_game = true;
     bool stub_devices = false;  // answer and log ioctls on unknown devices
     bool real_gles = false;     // LeapFrog's own GLES library (needs the 3D core)
     bool gl_trace = false;

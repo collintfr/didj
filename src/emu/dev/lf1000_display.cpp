@@ -257,6 +257,33 @@ Lf1000Display::Lf1000Display()
     for (int i = 0; i < kLayers; ++i) layers_[i].address = kVramBase + uint32_t(i) * kLayerRegion;
 }
 
+void Lf1000Display::compose_yuv(const Layer& l, uint32_t* out) {
+    // The video overlay: planar YUV 4:2:0 in block memory (4096-byte lines),
+    // scaled from scale[0] x scale[1] source pixels to the layer's rectangle.
+    const int32_t dst_w = l.right - l.left, dst_h = l.bottom - l.top;
+    if (dst_w <= 0 || dst_h <= 0) return;
+    const int32_t src_w = l.scale[0] > 0 ? l.scale[0] : dst_w, src_h = l.scale[1] > 0 ? l.scale[1] : dst_h;
+    const uint32_t stride = l.vstride ? l.vstride : 4096;
+    const uint32_t y_base = l.address & ~0x20000000u, u_base = l.address_u & ~0x20000000u,
+                   v_base = l.address_v & ~0x20000000u;
+    for (int32_t y = std::max(l.top, 0); y < std::min(l.bottom, int32_t(kHeight)); ++y) {
+        const uint32_t sy = uint32_t((y - l.top) * src_h / dst_h);
+        const uint8_t* yr = vram_ptr(y_base + sy * stride, uint32_t(src_w));
+        const uint8_t* ur = vram_ptr(u_base + sy / 2 * stride, uint32_t(src_w + 1) / 2);
+        const uint8_t* vr = vram_ptr(v_base + sy / 2 * stride, uint32_t(src_w + 1) / 2);
+        if (!yr || !ur || !vr) continue;
+        for (int32_t x = std::max(l.left, 0); x < std::min(l.right, int32_t(kWidth)); ++x) {
+            const uint32_t sx = uint32_t((x - l.left) * src_w / dst_w);
+            // BT.601, studio range.
+            const int c = int(yr[sx]) - 16, d = int(ur[sx / 2]) - 128, e = int(vr[sx / 2]) - 128;
+            const int r = std::clamp((298 * c + 409 * e + 128) >> 8, 0, 255);
+            const int g = std::clamp((298 * c - 100 * d - 208 * e + 128) >> 8, 0, 255);
+            const int b = std::clamp((298 * c + 516 * d + 128) >> 8, 0, 255);
+            out[uint32_t(y) * kWidth + uint32_t(x)] = uint32_t(r) << 16 | uint32_t(g) << 8 | uint32_t(b);
+        }
+    }
+}
+
 uint8_t* Lf1000Display::vram_ptr(uint32_t phys, uint32_t len) {
     if (phys < kVramBase || uint64_t(phys) + len > uint64_t(kVramBase) + kVramSize) return nullptr;
     return vram_.get() + (phys - kVramBase);
@@ -288,6 +315,10 @@ void Lf1000Display::compose(uint32_t* out) {
     for (int li = kLayers - 1; li >= 0; --li) {
         const Layer& l = layers_[li];
         if (!l.enabled || l.invisible) continue;
+        if (li == 2 && (l.format & 0xfff) == 0) {
+            compose_yuv(l, out);
+            continue;
+        }
         PixelLayout px = layout_for(l.format, l.hstride);
         const bool has_alpha = !(l.format & 0x4000) && px.a > 0;
         const bool swap_rb = l.format & 0x8000;

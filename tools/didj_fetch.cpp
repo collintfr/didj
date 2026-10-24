@@ -2,8 +2,9 @@
 //
 //   didj-fetch [--dir DIR] [--verify] [all | os | CART...]
 //
-// "os" is the root filesystem plus the Didj OS partition; "all" (the
-// default) adds every cartridge. Files already present with the right MD5
+// "os" is the root filesystem, the Didj OS partition and JetPack Heroes
+// (POW, the game built into the Didj); "all" (the default) adds every
+// cartridge. Files already present with the right MD5
 // are left alone, so running it again resumes or repairs a download. The
 // default directory is the one didj-run looks in (see pkg/paths.h).
 //
@@ -131,21 +132,24 @@ int main(int argc, char** argv) {
     for (const auto& w : wanted) {
         bool matched = false;
         for (const auto& d : didj::pkg::kDumps) {
-            bool sel = w == "all" || (w == "os" && !d.cartridge) || (d.cartridge && w == d.name);
+            // "os" includes JetPack Heroes, the game every Didj came with.
+            const std::string n = d.name;
+            bool sel = w == "all" || (w == "os" && !d.cartridge()) || w == n ||
+                       (d.kind == didj::pkg::DumpKind::Package && w + ".lfp" == n);
             if (sel) add(d), matched = true;
         }
         if (!matched) {
             std::fprintf(stderr, "didj-fetch: unknown dump '%s'. Cartridges:", w.c_str());
             for (const auto& d : didj::pkg::kDumps)
-                if (d.cartridge) std::fprintf(stderr, " %s", d.name);
+                if (d.cartridge()) std::fprintf(stderr, " %s", d.name);
             std::fprintf(stderr, "\n");
             return 2;
         }
     }
-    // A cartridge is useless without the system it runs on.
+    // A game is useless without the system it runs on.
     if (!verify_only)
         for (const auto& d : didj::pkg::kDumps)
-            if (!d.cartridge) add(d);
+            if (d.kind == didj::pkg::DumpKind::System) add(d);
     std::sort(files.begin(), files.end());  // table order: system first
 
     std::error_code ec;

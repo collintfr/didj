@@ -66,6 +66,8 @@ private:
     friend class DpcFile;
     friend class MemFile;
 
+    void compose_yuv(const Layer& l, uint32_t* out);
+
     std::mutex mu_;
     std::shared_ptr<uint8_t> vram_;
     Layer layers_[kLayers];

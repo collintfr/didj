@@ -7,6 +7,7 @@
 | `erootfs.jffs2` | JFFS2 | `/` | Root filesystem: uClibc 0.9.29, libstdc++ 6.0.8 (GCC 4.1), libpng 1.2, zlib, busybox, `/dev` nodes |
 | `Didj OS` | FAT16, label `Didj` | `/Didj` | `RealAppManager`, the BLT home screen, Brio SDK libraries and modules, `libopengles_lite.so`, fonts, audio, profiles |
 | cartridge (`SNC`, …) | FAT32, label `Cartridge` | `/Cart` | `/<3LD>/App.so`, its assets, and `meta.inf` |
+| `POW.lfp` | ZIP package | `/Didj/ProgramFiles/POW` | JetPack Heroes, the game built into every Didj; installed into the data directory on first run |
 
 ## Known-good checksums (MD5)
 
@@ -30,6 +31,7 @@ d4f4238c68d1d5854b9de9553479534f  NLG
 2a005446936b4a037ed12af4f8b513f9  SNC
 04b7efb8ba693e611d4f6966a0dda259  SW2
 4e112497256d75545123960e3cab16ec  WVN
+b560091d5e24509080f10d11a6a6600c  POW.lfp
 ```
 
 ## Checking a set of dumps

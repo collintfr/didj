@@ -104,6 +104,7 @@ private:
     uint32_t import(int i) const;
 
     // GL helpers.
+    void reset_gl();
     void set_error(uint32_t e);
     Mat& top();
     void mult(const Mat& m);
