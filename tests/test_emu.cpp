@@ -1,7 +1,9 @@
 // Tests for the CPU and guest memory layer, using hand-assembled ARM code.
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 #include <unicorn/unicorn.h>
@@ -100,6 +102,79 @@ void test_preempt_and_fault() {
     CHECK(cpu.fault().find("read from unmapped address 0x02000000") != std::string::npos);
 }
 
+// Time slicing must never re-execute instructions: a loop of post-increment
+// loads and accumulating stores, stopped every few microseconds, must still
+// produce exact results (guards cmake/patch_unicorn.cmake).
+void test_preemption_is_exact() {
+    Cpu cpu;
+    GuestMemory mem(cpu.uc());
+    CHECK(mem.map_fixed(kCode, kPageSize, "code"));
+    CHECK(mem.map_fixed(0x20000, 0x10000, "data"));
+    std::vector<uint32_t> data(0x4000);
+    for (size_t i = 0; i < data.size(); ++i) data[i] = uint32_t(i * 2654435761u);
+    mem.write(0x20000, data.data(), data.size() * 4);
+    CHECK(mem.map_fixed(0x30000, kPageSize, "scratch"));
+    // Four load/accumulate/store groups per block give many exit points.
+    put_code(mem, kCode, {
+                             0xe3a04803,  //        mov  r4, #0x30000    (scratch)
+                             0xe3a09000,  //        mov  r9, #0          (rounds)
+                             0xe3a08b02,  //        mov  r8, #0x800      (round limit)
+                             0xe3a00000,  // outer: mov  r0, #0          (sum)
+                             0xe3a01802,  //        mov  r1, #0x20000    (ptr)
+                             0xe3a02901,  //        mov  r2, #0x4000     (count)
+                             0xe4913004,  // loop:  ldr  r3, [r1], #4
+                             0xe0800003,  //        add  r0, r0, r3
+                             0xe5840000,  //        str  r0, [r4]
+                             0xe4913004,  //        ldr  r3, [r1], #4
+                             0xe0800003,  //        add  r0, r0, r3
+                             0xe5840000,  //        str  r0, [r4]
+                             0xe4913004,  //        ldr  r3, [r1], #4
+                             0xe0800003,  //        add  r0, r0, r3
+                             0xe5840000,  //        str  r0, [r4]
+                             0xe4913004,  //        ldr  r3, [r1], #4
+                             0xe0800003,  //        add  r0, r0, r3
+                             0xe5840000,  //        str  r0, [r4]
+                             0xe2522004,  //        subs r2, r2, #4
+                             0x1afffff1,  //        bne  loop
+                             0xe2899001,  //        add  r9, r9, #1
+                             0xe1590008,  //        cmp  r9, r8
+                             0x1affffeb,  //        bne  outer
+                             0xef000000,  //        svc  0
+                         });
+    uint32_t expect = 0;
+    for (uint32_t v : data) expect += v;
+    bool done = false;
+    cpu.on_interrupt = [&](uint32_t) {
+        done = true;
+        cpu.request_stop();
+    };
+    cpu.set_reg(kRegPC, kCode);
+    // Stop the CPU from another thread as often as possible, like the
+    // time-slice watchdog does, and resume each time through save/load.
+    std::atomic<bool> hammer{true};
+    std::thread stopper([&] {
+        while (hammer) {
+            cpu.request_stop();
+            std::this_thread::sleep_for(std::chrono::microseconds(5));
+        }
+    });
+    int stops = 0;
+    while (!done && stops < 10000000) {
+        if (cpu.run(0) == Cpu::Exit::Fault) break;
+        CpuContext ctx;
+        cpu.save(ctx);
+        cpu.load(ctx);
+        ++stops;
+    }
+    hammer = false;
+    stopper.join();
+    CHECK(done);
+    CHECK(stops > 10);  // the test only means something if it was preempted
+    uint32_t stored = 0;
+    mem.read_u32(0x30000, stored);
+    CHECK(cpu.reg(0) == expect && stored == expect && cpu.reg(9) == 0x800 && cpu.reg(1) == 0x20000 + 0x10000);
+}
+
 void test_memory() {
     Cpu cpu;
     GuestMemory mem(cpu.uc());
@@ -140,6 +215,8 @@ int main() {
     test_svc();
     test_thumb();
     test_preempt_and_fault();
+    // Each run catches a broken build about half the time; repeat.
+    for (int i = 0; i < 8; ++i) test_preemption_is_exact();
     test_memory();
     if (g_failures) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);

@@ -69,6 +69,8 @@ private:
     std::condition_variable cv_;
     bool running_ = false;
     bool quit_ = false;
+    bool in_hook_ = false;        // the emulation thread is inside on_interrupt
+    bool stop_deferred_ = false;  // a slice expired during the hook
     uint64_t generation_ = 0;
     std::chrono::steady_clock::time_point deadline_;
 };

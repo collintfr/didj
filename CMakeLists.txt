@@ -18,6 +18,7 @@ add_library(didjcore STATIC
   src/fs/fat.cpp
   src/fs/jffs2.cpp
   src/util/inflate.cpp
+  src/util/png.cpp
   src/pkg/metainf.cpp
   src/elf/dynamic.cpp
 )
@@ -37,15 +38,21 @@ if(DIDJ_BUILD_EMULATOR)
     GIT_REPOSITORY https://github.com/unicorn-engine/unicorn.git
     GIT_TAG d568885d64c89db5b9a722f0c1bef05aa92f84ca  # 2.1.1
     GIT_SHALLOW FALSE
+    PATCH_COMMAND ${CMAKE_COMMAND} -DUNICORN_SOURCE_DIR=<SOURCE_DIR> -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_unicorn.cmake
   )
   FetchContent_MakeAvailable(unicorn)
 
   add_library(didjemu STATIC
     src/emu/cpu.cpp
     src/emu/dev/basic.cpp
+    src/emu/dev/board.cpp
+    src/emu/dev/input.cpp
+    src/emu/dev/lf1000_display.cpp
+    src/emu/dev/oss.cpp
     src/emu/loader.cpp
     src/emu/memory.cpp
     src/emu/process.cpp
+    src/emu/socket.cpp
     src/emu/syscalls.cpp
     src/emu/vfs.cpp
   )

@@ -9,6 +9,8 @@
 
 #include "emu/linux_abi.h"
 #include "emu/loader.h"
+#include "emu/mqueue.h"
+#include "emu/socket.h"
 
 namespace didj::emu {
 
@@ -47,6 +49,12 @@ enum : uint32_t {
     NR_exit_group = 248, NR_set_tid_address = 256, NR_clock_settime = 262, NR_clock_gettime = 263,
     NR_clock_getres = 264, NR_clock_nanosleep = 265, NR_statfs64 = 266, NR_fstatfs64 = 267, NR_tgkill = 268,
     NR_utimes = 269, NR_fadvise64_64 = 270, NR_socket = 281, NR_set_robust_list = 338,
+    NR_bind = 282, NR_connect = 283, NR_listen = 284, NR_accept = 285, NR_getsockname = 286,
+    NR_getpeername = 287, NR_socketpair = 288, NR_send = 289, NR_sendto = 290, NR_recv = 291,
+    NR_recvfrom = 292, NR_shutdown = 293, NR_setsockopt = 294, NR_getsockopt = 295,
+    NR_timer_create = 257, NR_timer_settime = 258, NR_timer_gettime = 259, NR_timer_getoverrun = 260,
+    NR_timer_delete = 261, NR_mq_open = 274, NR_mq_unlink = 275, NR_mq_timedsend = 276,
+    NR_mq_timedreceive = 277, NR_mq_notify = 278, NR_mq_getsetattr = 279,
     NR_ARM_cacheflush = 0xf0002, NR_ARM_set_tls = 0xf0005,
 };
 
@@ -170,8 +178,20 @@ void Syscalls::handle() {
         else if (r == kNoResult) std::snprintf(rs, sizeof rs, "-");
         else if (r < 0 && r > -4096) std::snprintf(rs, sizeof rs, "-%lld", (long long)-r);
         else std::snprintf(rs, sizeof rs, "0x%llx", (unsigned long long)uint32_t(r));
-        std::fprintf(stderr, "[%d] %s(%x, %x, %x, %x, %x, %x) = %s\n", t.tid, n ? n : std::to_string(nr).c_str(),
-                     a[0], a[1], a[2], a[3], a[4], a[5], rs);
+        // Show the path for syscalls whose first argument is one.
+        std::string extra;
+        switch (nr) {
+            case NR_open: case NR_creat: case NR_stat: case NR_lstat: case NR_stat64: case NR_lstat64:
+            case NR_access: case NR_readlink: case NR_mkdir: case NR_rmdir: case NR_unlink: case NR_chdir:
+            case NR_rename: case NR_truncate: case NR_truncate64: case NR_mq_open: case NR_mq_unlink: {
+                std::string s;
+                if (p_.mem().read_string(a[0], s, 256)) extra = " \"" + s + "\"";
+                break;
+            }
+            default: break;
+        }
+        std::fprintf(stderr, "[%d] %s(%x, %x, %x, %x, %x, %x)%s = %s\n", t.tid, n ? n : std::to_string(nr).c_str(),
+                     a[0], a[1], a[2], a[3], a[4], a[5], extra.c_str(), rs);
     }
 
     if (r == kBlocked) {
@@ -182,6 +202,7 @@ void Syscalls::handle() {
     } else {
         cpu.set_reg(0, uint32_t(r));
         if (p_.exited_ || t.state != Thread::State::Runnable) cpu.request_stop();
+        else p_.preempt_if_needed();
     }
 }
 
@@ -367,6 +388,8 @@ int64_t Syscalls::do_clone(const Args& a) {
     Thread& parent = p_.current();
     t->tls = (flags & kCLONE_SETTLS) ? tls : parent.tls;
     t->sigmask = parent.sigmask;
+    t->policy = parent.policy;  // scheduling attributes are inherited
+    t->rt_priority = parent.rt_priority;
     if (flags & kCLONE_CHILD_CLEARTID) t->clear_child_tid = child_tid;
     if (flags & kCLONE_PARENT_SETTID) p_.mem().write_u32(parent_tid, uint32_t(t->tid));
     if (flags & kCLONE_CHILD_SETTID) p_.mem().write_u32(child_tid, uint32_t(t->tid));
@@ -646,9 +669,27 @@ int64_t Syscalls::dispatch(uint32_t nr, const Args& a) {
         case NR_sched_yield: return 0;
         case NR_sched_get_priority_max: return a[0] == 0 ? 0 : 99;
         case NR_sched_get_priority_min: return a[0] == 0 ? 0 : 1;
-        case NR_sched_getscheduler: return 0;
-        case NR_sched_setscheduler: case NR_sched_setparam: return 0;
-        case NR_sched_getparam: return mem.write_u32(a[1], 0) ? 0 : -kEFAULT;
+        case NR_sched_getscheduler:
+        case NR_sched_setscheduler:
+        case NR_sched_getparam:
+        case NR_sched_setparam: {
+            Thread* target = nullptr;
+            for (auto& th : p_.threads_)
+                if (a[0] == 0 ? th.get() == &t : th->tid == int(a[0])) target = th.get();
+            if (!target) return -kESRCH;
+            if (nr == NR_sched_getscheduler) return target->policy;
+            uint32_t param_addr = nr == NR_sched_setscheduler ? a[2] : a[1];
+            if (nr == NR_sched_getparam)
+                return mem.write_u32(param_addr, uint32_t(target->rt_priority)) ? 0 : -kEFAULT;
+            uint32_t prio;
+            if (!mem.read_u32(param_addr, prio)) return -kEFAULT;
+            int policy = nr == NR_sched_setscheduler ? int(a[1] & 0xff) : target->policy;
+            if (policy < 0 || policy > 2) return -kEINVAL;
+            if ((policy == 0) != (prio == 0) || prio > 99) return -kEINVAL;
+            target->policy = policy;
+            target->rt_priority = int(prio);
+            return 0;
+        }
         case NR_sched_setaffinity: return 0;
         case NR_sched_getaffinity: {
             if (a[1] < 4) return -kEINVAL;
@@ -847,7 +888,10 @@ int64_t Syscalls::dispatch(uint32_t nr, const Args& a) {
             fds[1] = p_.alloc_fd(w);
             return mem.write(a[0], fds, sizeof fds) ? 0 : -kEFAULT;
         }
-        case NR_ioctl: return do_ioctl(int(a[0]), a[1], a[2]);
+        case NR_ioctl: {
+            int64_t r = do_ioctl(int(a[0]), a[1], a[2]);
+            return r == OpenFile::kWouldBlock ? retry_later(nr, a, std::nullopt, 0) : r;
+        }
         case NR_fcntl:
         case NR_fcntl64: return do_fcntl(int(a[0]), a[1], a[2]);
         case NR_flock: return 0;
@@ -1053,7 +1097,275 @@ int64_t Syscalls::dispatch(uint32_t nr, const Args& a) {
         case NR_setrlimit: return 0;
         case NR_syslog: return 0;
         case NR_reboot: p_.exit_process(0); return kNoResult;
-        case NR_socket: return -kEAFNOSUPPORT;
+        // --- AF_UNIX sockets ---
+        case NR_socket: {
+            if (a[0] != 1 /*AF_UNIX*/) return -kEAFNOSUPPORT;
+            int type = int(a[1] & 0xf);
+            if (type != 1 /*SOCK_STREAM*/) return -kEOPNOTSUPP;
+            auto sock = std::make_shared<UnixSocket>();
+            sock->type = type;
+            sock->path = "socket:";
+            sock->flags = kO_RDWR | ((a[1] & 04000) ? uint32_t(kO_NONBLOCK) : 0u);  // SOCK_NONBLOCK
+            return p_.alloc_fd(sock);
+        }
+        case NR_socketpair: {
+            if (a[0] != 1 || (a[1] & 0xf) != 1) return -kEOPNOTSUPP;
+            auto ch = std::make_shared<SocketChannel>();
+            auto s1 = std::make_shared<UnixSocket>(), s2 = std::make_shared<UnixSocket>();
+            for (auto* sk : {s1.get(), s2.get()}) {
+                sk->state = UnixSocket::State::Connected;
+                sk->channel = ch;
+                sk->flags = kO_RDWR;
+                sk->path = "socket:";
+            }
+            s1->is_server_end = true;
+            int fds[2] = {p_.alloc_fd(s1), 0};
+            fds[1] = p_.alloc_fd(s2);
+            return mem.write(a[3], fds, sizeof fds) ? 0 : -kEFAULT;
+        }
+        case NR_bind:
+        case NR_connect: {
+            auto* sock = dynamic_cast<UnixSocket*>(p_.file(int(a[0])));
+            if (!sock) return -kENOTSOCK;
+            if (a[2] < 3 || a[2] > 110) return -kEINVAL;
+            std::vector<char> addr(a[2]);
+            if (!mem.read(a[1], addr.data(), addr.size())) return -kEFAULT;
+            // sun_path; a leading NUL means the abstract namespace.
+            std::string sun_path(addr.data() + 2, strnlen(addr.data() + 2, addr.size() - 2));
+            if (addr[2] == 0) sun_path = "@" + std::string(addr.data() + 3, addr.size() - 3);
+            if (nr == NR_bind) {
+                auto& slot = p_.unix_listeners_[sun_path];
+                if (!slot.expired()) return -kEADDRINUSE;
+                slot = std::static_pointer_cast<UnixSocket>(p_.fds_[int(a[0])].file);
+                sock->bound_path = sun_path;
+                return 0;
+            }
+            if (sock->state == UnixSocket::State::Connected) return -kEISCONN;
+            auto it = p_.unix_listeners_.find(sun_path);
+            auto listener = it == p_.unix_listeners_.end() ? nullptr : it->second.lock();
+            if (!listener || listener->state != UnixSocket::State::Listening) return -kECONNREFUSED;
+            auto server_end = std::make_shared<UnixSocket>();
+            server_end->channel = std::make_shared<SocketChannel>();
+            server_end->is_server_end = true;
+            server_end->state = UnixSocket::State::Connected;
+            server_end->flags = kO_RDWR;
+            server_end->path = "socket:" + sun_path;
+            sock->channel = server_end->channel;
+            sock->state = UnixSocket::State::Connected;
+            listener->backlog.push_back(server_end);
+            return 0;
+        }
+        case NR_listen: {
+            auto* sock = dynamic_cast<UnixSocket*>(p_.file(int(a[0])));
+            if (!sock) return -kENOTSOCK;
+            if (sock->bound_path.empty()) return -kEINVAL;
+            sock->state = UnixSocket::State::Listening;
+            return 0;
+        }
+        case NR_accept: {
+            auto* sock = dynamic_cast<UnixSocket*>(p_.file(int(a[0])));
+            if (!sock) return -kENOTSOCK;
+            if (sock->state != UnixSocket::State::Listening) return -kEINVAL;
+            if (sock->backlog.empty()) {
+                if (sock->flags & kO_NONBLOCK) return -kEAGAIN;
+                return retry_later(nr, a, std::nullopt, 0);
+            }
+            auto conn = sock->backlog.front();
+            sock->backlog.pop_front();
+            if (a[1] && a[2]) {
+                uint16_t family = 1;
+                mem.write(a[1], &family, 2);
+                mem.write_u32(a[2], 2);
+            }
+            return p_.alloc_fd(conn);
+        }
+        case NR_getsockname:
+        case NR_getpeername: {
+            auto* sock = dynamic_cast<UnixSocket*>(p_.file(int(a[0])));
+            if (!sock) return -kENOTSOCK;
+            uint16_t family = 1;
+            mem.write(a[1], &family, 2);
+            return mem.write_u32(a[2], 2) ? 0 : -kEFAULT;
+        }
+        case NR_send: case NR_sendto: case NR_recv: case NR_recvfrom: {
+            auto* sock = dynamic_cast<UnixSocket*>(p_.file(int(a[0])));
+            if (!sock) return -kENOTSOCK;
+            const bool dontwait = a[3] & 0x40;  // MSG_DONTWAIT
+            std::vector<uint8_t> tmp(a[2]);
+            int64_t n;
+            if (nr == NR_send || nr == NR_sendto) {
+                if (!mem.read(a[1], tmp.data(), tmp.size())) return -kEFAULT;
+                n = sock->write(tmp.data(), tmp.size());
+            } else {
+                n = sock->read(tmp.data(), tmp.size());
+                if (n > 0 && !mem.write(a[1], tmp.data(), size_t(n))) return -kEFAULT;
+            }
+            if (n == OpenFile::kWouldBlock) return dontwait ? -kEAGAIN : retry_later(nr, a, std::nullopt, 0);
+            return n;
+        }
+        case NR_shutdown: return dynamic_cast<UnixSocket*>(p_.file(int(a[0]))) ? 0 : -kENOTSOCK;
+        case NR_setsockopt: return 0;
+        case NR_getsockopt: {
+            if (a[3]) mem.write_u32(a[3], 0);
+            return 0;
+        }
+
+        // --- POSIX timers ---
+        case NR_timer_create: {
+            PosixTimer tm;
+            tm.clock = int(a[0]);
+            if (a[1]) {
+                uint32_t ev[4];  // sigev_value, sigev_signo, sigev_notify, sigev_notify_thread_id
+                if (!mem.read(a[1], ev, sizeof ev)) return -kEFAULT;
+                tm.value = ev[0];
+                tm.signo = int(ev[1]);
+                tm.notify = int(ev[2]);
+                tm.tid = int(ev[3]);
+                if (tm.notify != 0 && tm.notify != 1 && tm.notify != 4) return -kEINVAL;
+            } else {
+                tm.value = uint32_t(p_.next_timer_);
+            }
+            int id = p_.next_timer_++;
+            p_.timers_[id] = tm;
+            return mem.write_u32(a[2], uint32_t(id)) ? 0 : -kEFAULT;
+        }
+        case NR_timer_settime:
+        case NR_timer_gettime: {
+            auto it = p_.timers_.find(int(a[0]));
+            if (it == p_.timers_.end()) return -kEINVAL;
+            PosixTimer& tm = it->second;
+            uint32_t old_out = nr == NR_timer_settime ? a[3] : a[1];
+            if (old_out) {
+                int64_t left = tm.next ? std::max<int64_t>(0, std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                                  *tm.next - Clock::now()).count())
+                                       : 0;
+                write_timespec(old_out, std::chrono::duration_cast<std::chrono::nanoseconds>(tm.interval).count());
+                write_timespec(old_out + 8, left);
+            }
+            if (nr == NR_timer_gettime) return 0;
+            int64_t interval, value;
+            if (!read_timespec(a[2], interval) || !read_timespec(a[2] + 8, value)) return -kEINVAL;
+            tm.interval = std::chrono::nanoseconds(interval);
+            tm.overrun = 0;
+            if (!value) {
+                tm.next.reset();
+            } else if (a[1] & 1) {  // TIMER_ABSTIME
+                tm.next = tm.clock == 0 ? Process::from_realtime(value)
+                                        : Clock::now() + std::chrono::nanoseconds(value - clock_ns(tm.clock));
+            } else {
+                tm.next = Clock::now() + std::chrono::nanoseconds(value);
+            }
+            return 0;
+        }
+        case NR_timer_getoverrun: {
+            auto it = p_.timers_.find(int(a[0]));
+            return it == p_.timers_.end() ? -kEINVAL : it->second.overrun;
+        }
+        case NR_timer_delete: return p_.timers_.erase(int(a[0])) ? 0 : -kEINVAL;
+
+        // --- POSIX message queues ---
+        case NR_mq_open: {
+            std::string qname = path_arg(a[0], ok);
+            if (!ok) return -kEFAULT;
+            auto it = p_.mqueues_.find(qname);
+            std::shared_ptr<MessageQueue> q;
+            if (it != p_.mqueues_.end()) {
+                if ((a[1] & kO_CREAT) && (a[1] & kO_EXCL)) return -kEEXIST;
+                q = it->second;
+            } else {
+                if (!(a[1] & kO_CREAT)) return -kENOENT;
+                q = std::make_shared<MessageQueue>();
+                if (a[3]) {
+                    uint32_t attr[4];  // mq_flags, mq_maxmsg, mq_msgsize, mq_curmsgs
+                    if (!mem.read(a[3], attr, sizeof attr)) return -kEFAULT;
+                    if (!attr[1] || !attr[2] || attr[1] > 65536 || attr[2] > (1u << 20)) return -kEINVAL;
+                    q->maxmsg = attr[1];
+                    q->msgsize = attr[2];
+                }
+                p_.mqueues_[qname] = q;
+            }
+            auto f = std::make_shared<MqueueFile>(q);
+            f->path = "mqueue:" + qname;
+            f->flags = a[1] & (kO_ACCMODE | kO_NONBLOCK);
+            return p_.alloc_fd(f);
+        }
+        case NR_mq_unlink: {
+            std::string qname = path_arg(a[0], ok);
+            if (!ok) return -kEFAULT;
+            return p_.mqueues_.erase(qname) ? 0 : -kENOENT;
+        }
+        case NR_mq_timedsend:
+        case NR_mq_timedreceive: {
+            auto* f = dynamic_cast<MqueueFile*>(p_.file(int(a[0])));
+            if (!f) return -kEBADF;
+            MessageQueue& q = *f->q;
+            const bool send = nr == NR_mq_timedsend;
+            if (send ? q.full() : q.empty()) {
+                if (f->flags & kO_NONBLOCK) return -kEAGAIN;
+                std::optional<Clock::time_point> deadline;
+                if (!retrying_ && a[4]) {
+                    int64_t ns;
+                    if (!read_timespec(a[4], ns)) return -kEINVAL;
+                    deadline = Process::from_realtime(ns);
+                    if (*deadline <= Clock::now()) return -kETIMEDOUT;
+                }
+                return retry_later(nr, a, deadline, -kETIMEDOUT);
+            }
+            if (send) {
+                if (a[2] > q.msgsize) return -kEMSGSIZE;
+                std::vector<uint8_t> msg(a[2]);
+                if (a[2] && !mem.read(a[1], msg.data(), msg.size())) return -kEFAULT;
+                bool was_empty = q.empty();
+                q.push(a[3], std::move(msg));
+                if (was_empty && q.notify_armed) {
+                    q.notify_armed = false;  // one-shot, as in the kernel
+                    if (q.notify_signo) {
+                        SigInfo info;
+                        info.code = -3;  // SI_MESGQ
+                        info.value = q.notify_value;
+                        p_.raise_signal(q.notify_signo, 0, info);
+                    }
+                }
+                return 0;
+            }
+            if (a[2] < q.msgsize) return -kEMSGSIZE;
+            uint32_t prio;
+            std::vector<uint8_t> msg = q.pop(prio);
+            if (!msg.empty() && !mem.write(a[1], msg.data(), msg.size())) return -kEFAULT;
+            if (a[3]) mem.write_u32(a[3], prio);
+            return int64_t(msg.size());
+        }
+        case NR_mq_notify: {
+            auto* f = dynamic_cast<MqueueFile*>(p_.file(int(a[0])));
+            if (!f) return -kEBADF;
+            MessageQueue& q = *f->q;
+            if (!a[1]) {
+                q.notify_armed = false;
+                return 0;
+            }
+            uint32_t ev[3];
+            if (!mem.read(a[1], ev, sizeof ev)) return -kEFAULT;
+            if (q.notify_armed) return -kEBUSY;
+            if (ev[2] != 0 && ev[2] != 1) return -kEINVAL;  // SIGEV_SIGNAL or SIGEV_NONE
+            q.notify_armed = true;
+            q.notify_signo = ev[2] == 0 ? int(ev[1]) : 0;
+            q.notify_value = ev[0];
+            return 0;
+        }
+        case NR_mq_getsetattr: {
+            auto* f = dynamic_cast<MqueueFile*>(p_.file(int(a[0])));
+            if (!f) return -kEBADF;
+            if (a[2]) {
+                uint32_t attr[8] = {f->flags & kO_NONBLOCK, f->q->maxmsg, f->q->msgsize, uint32_t(f->q->count)};
+                if (!mem.write(a[2], attr, sizeof attr)) return -kEFAULT;
+            }
+            if (a[1]) {
+                uint32_t flags;
+                if (!mem.read_u32(a[1], flags)) return -kEFAULT;
+                f->flags = (f->flags & ~kO_NONBLOCK) | (flags & kO_NONBLOCK);
+            }
+            return 0;
+        }
         case NR_restart_syscall: return -kEINTR;
 
         default:

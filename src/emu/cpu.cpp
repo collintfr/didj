@@ -31,7 +31,22 @@ const char* access_name(int type) {
 struct CpuHooks {
     static void intr(uc_engine*, uint32_t intno, void* user) {
         auto* cpu = static_cast<Cpu*>(user);
+        // Keep the watchdog from stopping Unicorn while a hook changes
+        // registers or memory mappings; a slice that ends meanwhile stops
+        // the CPU once the hook is done.
+        {
+            std::lock_guard<std::mutex> lock(cpu->mu_);
+            cpu->in_hook_ = true;
+        }
         if (cpu->on_interrupt) cpu->on_interrupt(intno);
+        bool stop;
+        {
+            std::lock_guard<std::mutex> lock(cpu->mu_);
+            cpu->in_hook_ = false;
+            stop = cpu->stop_deferred_;
+            cpu->stop_deferred_ = false;
+        }
+        if (stop) uc_emu_stop(cpu->uc_);
     }
     static bool bad_access(uc_engine*, uc_mem_type type, uint64_t addr, int, int64_t, void* user) {
         auto* cpu = static_cast<Cpu*>(user);
@@ -99,7 +114,8 @@ void Cpu::watchdog_loop() {
         }
         uint64_t gen = generation_;
         if (cv_.wait_until(lock, deadline_) == std::cv_status::timeout && running_ && gen == generation_) {
-            uc_emu_stop(uc_);
+            if (in_hook_) stop_deferred_ = true;
+            else uc_emu_stop(uc_);
             deadline_ = std::chrono::steady_clock::time_point();
         }
     }
@@ -123,6 +139,7 @@ Cpu::Exit Cpu::run(uint32_t slice_us) {
     {
         std::lock_guard<std::mutex> lock(mu_);
         running_ = false;
+        stop_deferred_ = false;
         deadline_ = std::chrono::steady_clock::time_point();
     }
     if (err == UC_ERR_OK) return Exit::Stopped;

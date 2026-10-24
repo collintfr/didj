@@ -269,6 +269,12 @@ std::optional<fs::Entry> Vfs::image_entry(Mount& m, const std::string& rel) {
     return e;
 }
 
+bool Vfs::is_synthetic_dir(const std::string& canonical) const {
+    std::string prefix = canonical == "/" ? "/" : canonical + "/";
+    auto it = synthetic_.lower_bound(prefix);
+    return it != synthetic_.end() && it->first.compare(0, prefix.size(), prefix) == 0;
+}
+
 Vfs::Node Vfs::node_at(const std::string& canonical) {
     Node n;
     if (synthetic_.count(canonical)) {
@@ -276,6 +282,18 @@ Vfs::Node Vfs::node_at(const std::string& canonical) {
         n.rel = canonical;
         return n;
     }
+    n = node_at_layers(canonical);
+    if (n.kind == Node::Missing && is_synthetic_dir(canonical)) {
+        // Directories that exist only to hold synthetic files (/sys/devices/...).
+        n.kind = Node::SyntheticDir;
+        n.type = fs::NodeType::Dir;
+        n.rel = canonical;
+    }
+    return n;
+}
+
+Vfs::Node Vfs::node_at_layers(const std::string& canonical) {
+    Node n;
     n.mount = mount_for(canonical, n.rel);
     if (!n.mount) return n;
     Mount& m = *n.mount;
@@ -346,6 +364,11 @@ int Vfs::stat_node(const Node& n, StatInfo& st) {
             auto f = synthetic_[n.rel](kO_RDONLY);
             return f ? f->fstat(st) : -kENOENT;
         }
+        case Node::SyntheticDir:
+            st.mode = kS_IFDIR | 0755;
+            st.nlink = 2;
+            st.ino = path_ino(n.rel);
+            return 0;
         case Node::Image: {
             const fs::Entry& e = n.entry;
             st.dev = n.mount->dev;
@@ -396,6 +419,16 @@ std::vector<DirItem> Vfs::list_dir(const std::string& canonical, const Node& n) 
             uint8_t t = it->is_directory(ec) ? kDT_DIR : kDT_REG;
             items[name] = DirItem{path_ino(canonical + "/" + name), t, name};
         }
+    }
+    // Synthetic children (files and the directories that lead to them).
+    std::string prefix = canonical == "/" ? "/" : canonical + "/";
+    for (auto it = synthetic_.lower_bound(prefix); it != synthetic_.end() && it->first.compare(0, prefix.size(), prefix) == 0;
+         ++it) {
+        std::string rest = it->first.substr(prefix.size());
+        size_t slash = rest.find('/');
+        std::string name = rest.substr(0, slash);
+        if (!items.count(name))
+            items[name] = DirItem{path_ino(prefix + name), slash == std::string::npos ? kDT_REG : kDT_DIR, name};
     }
     std::vector<DirItem> out;
     out.push_back(DirItem{path_ino(canonical), kDT_DIR, "."});
@@ -474,6 +507,11 @@ int Vfs::open(const std::string& cwd, const std::string& path, uint32_t flags, u
         case fs::NodeType::CharDevice:
         case fs::NodeType::BlockDevice: {
             auto it = devices_.find(uint32_t(n.entry.rdev));
+            if (it == devices_.end() && fallback_device_) {
+                out = fallback_device_(canon, uint32_t(n.entry.rdev), flags);
+                if (!out) return -kENXIO;
+                break;
+            }
             if (it == devices_.end()) {
                 std::fprintf(stderr, "[vfs] no driver for %s (%u, %u)\n", canon.c_str(), dev_major(n.entry.rdev),
                              dev_minor(n.entry.rdev));

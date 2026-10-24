@@ -7,6 +7,7 @@
 #include "emu/dev/basic.h"
 #include "emu/linux_abi.h"
 #include "emu/loader.h"
+#include "emu/mqueue.h"
 #include "emu/syscalls.h"
 
 namespace didj::emu {
@@ -126,8 +127,37 @@ void Process::on_interrupt(uint32_t intno) {
     cpu_.request_stop();
 }
 
-void Process::raise_signal(int sig, int tid) {
+Clock::time_point Process::from_realtime(int64_t ns) {
+    using namespace std::chrono;
+    int64_t now = duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count();
+    return Clock::now() + nanoseconds(ns - now);
+}
+
+void Process::fire_timers() {
+    const auto now = Clock::now();
+    for (auto& [id, tm] : timers_) {
+        if (!tm.next || *tm.next > now) continue;
+        if (tm.interval.count() > 0) {
+            // Periodic: count missed periods as overruns, like the kernel.
+            auto late = now - *tm.next;
+            int64_t missed = late / tm.interval;
+            tm.overrun = int(std::min<int64_t>(missed, 0x7fffffff));
+            *tm.next += tm.interval * (missed + 1);
+        } else {
+            tm.next.reset();
+        }
+        if (tm.notify == 1) continue;  // SIGEV_NONE
+        SigInfo info;
+        info.code = -2;  // SI_TIMER
+        info.value = tm.value;
+        info.timer = id;
+        raise_signal(tm.signo, tm.notify == 4 ? tm.tid : 0, info);
+    }
+}
+
+void Process::raise_signal(int sig, int tid, SigInfo info) {
     if (sig <= 0 || sig > 64) return;
+    siginfo_[sig] = info;
     if (!tid) {
         process_pending_ |= sigbit(sig);
         return;
@@ -145,8 +175,17 @@ void Process::setup_signal_frame(Thread& t, int sig, const SigAction& act) {
     std::vector<uint8_t> frame(frame_size, 0);
     auto put = [&](uint32_t off, uint32_t v) { std::memcpy(&frame[off], &v, 4); };
     if (rt) {
-        put(0, uint32_t(sig));  // si_signo; si_errno and si_code stay 0 (SI_USER)
-        put(12, uint32_t(pid_));
+        const SigInfo& info = siginfo_[sig];
+        put(0, uint32_t(sig));  // si_signo; si_errno stays 0
+        put(8, uint32_t(info.code));
+        if (info.code == -2) {   // SI_TIMER: si_tid, si_overrun, si_value
+            put(12, uint32_t(info.timer));
+            put(16, uint32_t(timers_.count(info.timer) ? timers_[info.timer].overrun : 0));
+            put(20, info.value);
+        } else {                 // SI_USER/SI_QUEUE/SI_MESGQ: si_pid, si_uid, si_value
+            put(12, uint32_t(pid_));
+            put(20, info.value);
+        }
     }
     uint32_t mc = uc - sp + kUcMcontext;
     put(mc + 8, uint32_t(t.sigmask));  // oldmask
@@ -250,45 +289,68 @@ void Process::exit_process(int status) {
     exit_status_ = status;
 }
 
+bool Process::try_wake(Thread& t, Clock::time_point now) {
+    Thread* saved = current_;
+    current_ = &t;  // wake() may re-run a syscall on behalf of t
+    bool woke = false;
+    if (deliver_signals(t)) {
+        woke = t.state == Thread::State::Runnable;
+    } else if (t.wake && t.wake(t)) {
+        woke = true;
+    } else if (t.deadline && now >= *t.deadline) {
+        t.ctx.r[0] = uint32_t(t.timeout_result);
+        t.futex_addr = 0;
+        woke = true;
+    }
+    current_ = saved;
+    if (woke) {
+        t.state = Thread::State::Runnable;
+        t.wake = nullptr;
+        t.deadline.reset();
+    }
+    return woke;
+}
+
 Thread* Process::pick_next() {
     if (threads_.empty()) return nullptr;
-    // Round-robin, starting after the thread that ran last.
+    const auto now = Clock::now();
+    for (auto& t : threads_)
+        if (t->state == Thread::State::Blocked) try_wake(*t, now);
+    if (exited_) return nullptr;
+
+    // Highest priority wins; round-robin among equals, starting after the
+    // thread that ran last.
     auto start = threads_.begin();
     for (auto it = threads_.begin(); it != threads_.end(); ++it)
         if (it->get() == current_) {
             start = std::next(it);
             break;
         }
-    const auto now = Clock::now();
+    Thread* best = nullptr;
     for (size_t n = 0; n < threads_.size(); ++n, ++start) {
         if (start == threads_.end()) start = threads_.begin();
         Thread& t = **start;
-        if (t.state == Thread::State::Exited) continue;
-        if (t.state == Thread::State::Blocked) {
-            current_ = &t;  // wake() may re-run a syscall on behalf of t
-            if (deliver_signals(t)) {
-                if (exited_) return nullptr;
-                return &t;
-            }
-            if (t.wake && t.wake(t)) {
-                t.state = Thread::State::Runnable;
-                t.wake = nullptr;
-                t.deadline.reset();
-            } else if (t.deadline && now >= *t.deadline) {
-                t.ctx.r[0] = uint32_t(t.timeout_result);
-                t.state = Thread::State::Runnable;
-                t.wake = nullptr;
-                t.deadline.reset();
-                t.futex_addr = 0;
-            } else {
-                continue;
-            }
-        }
-        deliver_signals(t);
-        if (exited_) return nullptr;
-        return &t;
+        if (t.state != Thread::State::Runnable) continue;
+        if (!best || t.effective_priority() > best->effective_priority()) best = &t;
     }
-    return nullptr;
+    if (best) {
+        deliver_signals(*best);
+        if (exited_) return nullptr;
+    }
+    return best;
+}
+
+void Process::preempt_if_needed() {
+    if (!current_) return;
+    const int prio = current_->effective_priority();
+    const auto now = Clock::now();
+    for (auto& t : threads_) {
+        if (t.get() == current_ || t->effective_priority() <= prio) continue;
+        if (t->state == Thread::State::Runnable || (t->state == Thread::State::Blocked && try_wake(*t, now))) {
+            cpu_.request_stop();
+            return;
+        }
+    }
 }
 
 void Process::switch_to(Thread& t) {
@@ -300,6 +362,7 @@ void Process::switch_to(Thread& t) {
 int Process::run() {
     while (!exited_) {
         if (on_idle) on_idle();
+        fire_timers();
         // Reap exited threads (the one that ran last stays until replaced).
         threads_.remove_if([&](const std::unique_ptr<Thread>& t) {
             return t->state == Thread::State::Exited && t.get() != current_;
@@ -315,6 +378,8 @@ int Process::run() {
                 any_blocked = true;
                 if (o->deadline && (!soonest || *o->deadline < *soonest)) soonest = o->deadline;
             }
+            for (auto& [id, tm] : timers_)
+                if (tm.next && (!soonest || *tm.next < *soonest)) soonest = tm.next;
             if (!any_blocked) break;
             // Nothing can run: sleep until the next timeout, polling for
             // wakeups that come from outside (devices, the front end).
@@ -324,10 +389,17 @@ int Process::run() {
             continue;
         }
 
-        size_t runnable = 0;
-        for (auto& o : threads_) runnable += o->state != Thread::State::Exited;
+        // Slice: until the next timeout of a higher-priority thread, capped so
+        // equal-priority threads share the CPU and on_idle runs regularly.
+        auto slice = std::chrono::microseconds(opts_.slice_us);
+        for (auto& o : threads_) {
+            if (o.get() == t || o->state != Thread::State::Blocked || !o->deadline) continue;
+            if (o->effective_priority() <= t->effective_priority()) continue;
+            auto until = std::chrono::duration_cast<std::chrono::microseconds>(*o->deadline - Clock::now());
+            slice = std::max(std::chrono::microseconds(100), std::min(slice, until));
+        }
         switch_to(*t);
-        Cpu::Exit how = cpu_.run(runnable > 1 ? opts_.slice_us : 0);
+        Cpu::Exit how = cpu_.run(uint32_t(slice.count()));
         cpu_.save(t->ctx);
         if (how == Cpu::Exit::Fault) {
             std::fprintf(stderr, "[didj] thread %d: %s\n", t->tid, cpu_.fault().c_str());

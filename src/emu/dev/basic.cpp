@@ -145,6 +145,31 @@ private:
     uint64_t pos_ = 0;
 };
 
+class StubDevice : public CharDevice {
+public:
+    StubDevice(std::string path, uint32_t rdev) : CharDevice(rdev), name_(std::move(path)) {}
+    int64_t read(void*, size_t) override { return 0; }
+    int64_t write(const void*, size_t len) override { return int64_t(len); }
+    int ioctl(uint32_t cmd, uint32_t arg, GuestMemory& mem) override {
+        uint32_t word = 0;
+        bool readable = mem.read_u32(arg, word);
+        std::fprintf(stderr, "[stub] %s ioctl 0x%08x (dir %u, '%c' nr %u, size %u) arg 0x%08x%s%08x\n", name_.c_str(),
+                     cmd, cmd >> 30, int((cmd >> 8) & 0xff) >= 32 ? int((cmd >> 8) & 0xff) : '?', cmd & 0xff,
+                     (cmd >> 16) & 0x3fff, arg, readable ? " -> " : " ", readable ? word : 0);
+        return 0;
+    }
+    int mmap(uint64_t offset, uint32_t len, uint8_t** host, std::shared_ptr<void>* owner) override {
+        std::fprintf(stderr, "[stub] %s mmap offset 0x%llx len 0x%x\n", name_.c_str(), (unsigned long long)offset, len);
+        auto block = std::shared_ptr<uint8_t>(new uint8_t[len](), std::default_delete<uint8_t[]>());
+        *host = block.get();
+        *owner = block;
+        return 0;
+    }
+
+private:
+    std::string name_;
+};
+
 template <typename T>
 DeviceFactory device(uint32_t major, uint32_t minor) {
     return [=](uint32_t) { return std::make_shared<T>(make_dev(major, minor)); };
@@ -157,6 +182,12 @@ std::shared_ptr<OpenFile> make_console(int host_stream) {
     c->path = "/dev/console";
     c->flags = host_stream == 0 ? kO_RDONLY : kO_WRONLY;
     return c;
+}
+
+std::shared_ptr<OpenFile> make_stub_device(const std::string& path, uint32_t rdev, uint32_t flags) {
+    auto d = std::make_shared<StubDevice>(path, rdev);
+    d->flags = flags;
+    return d;
 }
 
 std::shared_ptr<OpenFile> make_text_file(std::string text) { return std::make_shared<TextFile>(std::move(text)); }

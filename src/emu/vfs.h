@@ -82,6 +82,11 @@ public:
     // Character devices by device number, and synthetic files by path.
     void add_device(uint32_t major, uint32_t minor, DeviceFactory f);
     void add_synthetic(const std::string& path, DeviceFactory f);
+    // Used for device nodes with no registered driver (development aid).
+    void set_fallback_device(std::function<std::shared_ptr<OpenFile>(const std::string& path, uint32_t rdev,
+                                                                       uint32_t flags)> f) {
+        fallback_device_ = std::move(f);
+    }
 
     // Canonical absolute path (symlinks resolved) for a guest path.
     int resolve(const std::string& cwd, const std::string& path, bool follow_last, std::string& out);
@@ -111,7 +116,7 @@ private:
     };
     // What a canonical path refers to.
     struct Node {
-        enum Kind { Missing, Image, Host, Synthetic } kind = Missing;
+        enum Kind { Missing, Image, Host, Synthetic, SyntheticDir } kind = Missing;
         Mount* mount = nullptr;
         std::string rel;                // path relative to the mount, no leading '/'
         fs::Entry entry;                // Image
@@ -121,6 +126,8 @@ private:
 
     Mount* mount_for(const std::string& canonical, std::string& rel);
     Node node_at(const std::string& canonical);
+    Node node_at_layers(const std::string& canonical);
+    bool is_synthetic_dir(const std::string& canonical) const;
     std::optional<fs::Entry> image_entry(Mount& m, const std::string& rel);
     int stat_node(const Node& n, StatInfo& st);
     int copy_up(Node& n);
@@ -129,6 +136,7 @@ private:
     std::vector<std::unique_ptr<Mount>> mounts_;
     std::map<uint32_t, DeviceFactory> devices_;  // key: make_dev(major, minor)
     std::map<std::string, DeviceFactory> synthetic_;
+    std::function<std::shared_ptr<OpenFile>(const std::string&, uint32_t, uint32_t)> fallback_device_;
 };
 
 // Joins a possibly relative guest path onto cwd and normalizes "." and "..",
