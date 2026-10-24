@@ -11,4 +11,8 @@ namespace didj::pkg {
 // variables it needs are set.
 std::filesystem::path default_dump_dir();
 
+// Where the windowed front end keeps what the Didj writes (profiles, saves):
+// $DIDJ_DATA if set, otherwise "data" next to the default dump directory.
+std::filesystem::path default_data_dir();
+
 }  // namespace didj::pkg

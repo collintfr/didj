@@ -39,13 +39,32 @@ It needs `curl`, which comes with Windows 10 and later and with every Linux dist
 
 ## Building
 
-You need CMake 3.16+ and a C++17 compiler: GCC, Clang or MSVC.
+You need CMake 3.16+ and a C++17 compiler: GCC, Clang or MSVC. The window uses SDL2: the system's if CMake finds it (on Debian and Ubuntu, `apt install libsdl2-dev`), otherwise the build downloads and compiles it.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ctest --test-dir build -C Release
 ```
+
+## Playing
+
+```sh
+didj --cart SNC
+```
+
+`didj` opens a window on the Didj's home screen with the cartridge inserted. Profiles and game saves are kept next to the dumps (`--data` to choose another place).
+
+| Didj | Keyboard | Controller |
+| --- | --- | --- |
+| Pad | arrow keys | D-pad |
+| A / B | X / Z | A / B |
+| L / R | A / S | shoulder buttons |
+| Pause | Enter or P | Start |
+| Hint | H | Y |
+| Home | Esc | Back / Guide |
+
+F11 toggles fullscreen and F12 saves a screenshot. `--scale N` sets the window size.
 
 ## didj-run
 
@@ -92,6 +111,6 @@ didjtool coverage "Didj OS:/Base" SNC:/SNC   # imports that nothing provides
 2. **Done: system libraries.** A JFFS2 reader with a built-in inflate loads the original root filesystem. With it, every import from the OS partition and Sonic resolves.
 3. **Done: user-mode Linux.** ARM926 CPU on Unicorn, ELF loader, a VFS over the dumps with host overlays for writes, about 150 syscalls, green threads with futexes, and signals. The original busybox runs (`ls`, `cat`, `sh`, `md5sum`), and `RealAppManager` loads all of its Brio and Lightning libraries.
 4. **Done: `RealAppManager` headless.** POSIX message queues and timers, AF_UNIX sockets, real-time priority scheduling, and the LF1000 devices: evdev buttons, OSS audio, board sysfs, and the MLC/layer/DPC/GPIO display model with `/dev/mem` video memory. `RealAppManager` brings up every Brio module, streams audio, and runs the BLT home screen.
-5. **Half done: display, input and audio.** The guest side works: LeapFrog's software drives the emulated display layers, button device and sound device. Still missing: a window, keyboard and gamepad input, and sound on the host.
+5. **Done: display, input and audio.** LeapFrog's software drives the emulated display layers, button device and sound device; `didj` shows the picture in a window, maps keyboard and game controllers to the buttons, and plays the sound.
 6. **In progress: OpenGL ES 1.x.** A generated replacement for `libopengles_lite.so` sends every GL and EGL call to a software renderer and hands finished frames to LeapFrog's display library as the original did. The BLT home screen, its first-run setup and Sonic the Hedgehog's menus and gameplay render correctly, at full speed. Lighting, fog and some less common calls are not implemented yet; they are reported the first time a program uses them.
 7. Compatibility pass across all cartridges, save data, packaging.

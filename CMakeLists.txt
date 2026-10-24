@@ -55,6 +55,7 @@ if(DIDJ_BUILD_EMULATOR)
     src/emu/hle/raster.cpp
     src/emu/hle/stub_elf.cpp
     src/emu/loader.cpp
+    src/emu/machine.cpp
     src/emu/memory.cpp
     src/emu/process.cpp
     src/emu/socket.cpp
@@ -65,6 +66,29 @@ if(DIDJ_BUILD_EMULATOR)
 
   add_executable(didj-run tools/didj_run.cpp)
   target_link_libraries(didj-run PRIVATE didjemu)
+
+  # The windowed front end, on SDL2: the system's if it has one, otherwise
+  # built from source (set FETCHCONTENT_SOURCE_DIR_SDL2 for a local checkout).
+  option(DIDJ_BUILD_FRONTEND "Build the windowed front end (SDL2)" ON)
+  if(DIDJ_BUILD_FRONTEND)
+    find_package(SDL2 CONFIG QUIET)
+    if(NOT TARGET SDL2::SDL2 AND NOT TARGET SDL2::SDL2-static)
+      set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+      set(SDL_STATIC ON CACHE BOOL "" FORCE)
+      set(SDL_TEST OFF CACHE BOOL "" FORCE)
+      FetchContent_Declare(SDL2
+        URL https://github.com/libsdl-org/SDL/releases/download/release-2.30.9/SDL2-2.30.9.tar.gz
+        URL_HASH SHA256=24b574f71c87a763f50704bbb630cbe38298d544a1f890f099a4696b1d6beba4
+      )
+      FetchContent_MakeAvailable(SDL2)
+    endif()
+    add_executable(didj tools/didj_main.cpp)
+    if(TARGET SDL2::SDL2)
+      target_link_libraries(didj PRIVATE didjemu SDL2::SDL2)
+    else()
+      target_link_libraries(didj PRIVATE didjemu SDL2::SDL2-static)
+    endif()
+  endif()
 endif()
 
 add_executable(didjtool tools/didjtool.cpp)
