@@ -172,6 +172,7 @@ std::optional<DynamicInfo> parse_dynamic(const std::vector<uint8_t>& image, std:
         if (!r.ok(s, 16)) break;
         DynSymbol sym;
         sym.name = r.str(strtab + r.u32(s));
+        if (sym.name.empty()) continue;  // section symbols play no part in linking
         sym.value = r.u32(s + 4);
         sym.size = r.u32(s + 8);
         uint8_t st_info = image[s + 12];

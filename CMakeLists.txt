@@ -14,7 +14,10 @@ endif()
 
 # Core library shared by the emulator and the tools.
 add_library(didjcore STATIC
+  src/fs/filesystem.cpp
   src/fs/fat.cpp
+  src/fs/jffs2.cpp
+  src/util/inflate.cpp
   src/pkg/metainf.cpp
   src/elf/dynamic.cpp
 )
@@ -27,5 +30,6 @@ include(CTest)
 if(BUILD_TESTING)
   add_executable(didj_tests tests/test_main.cpp)
   target_link_libraries(didj_tests PRIVATE didjcore)
+  target_include_directories(didj_tests PRIVATE tests)
   add_test(NAME didj_tests COMMAND didj_tests)
 endif()

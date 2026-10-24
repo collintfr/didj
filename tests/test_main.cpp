@@ -10,7 +10,9 @@
 
 #include "elf/dynamic.h"
 #include "fs/fat.h"
+#include "fs/jffs2.h"
 #include "pkg/metainf.h"
+#include "util/inflate.h"
 
 namespace {
 
@@ -237,7 +239,7 @@ void test_fat(didj::fs::FatType type, uint32_t clusters, uint32_t lead_in) {
 
     auto top = img->list("/");
     CHECK(top && top->size() == 2);
-    CHECK(img->stat("/snc") && img->stat("/snc")->is_dir);
+    CHECK(img->lookup("/snc") && img->lookup("/snc")->is_dir());
 
     auto entries = img->list("/SNC");
     CHECK(entries && entries->size() == 4);  // "." and ".." are hidden
@@ -246,7 +248,8 @@ void test_fat(didj::fs::FatType type, uint32_t clusters, uint32_t lead_in) {
     CHECK(img->read_file("/SNC/App.so") == app);
     CHECK(img->read_file("snc/app.so") == app);
     CHECK(img->read_file("/SNC/APP.SO") == app);  // 8.3 alias
-    CHECK(img->stat("/SNC/meta.inf") && img->stat("/SNC/meta.inf")->name == "meta.inf");
+    CHECK(img->lookup("/SNC/meta.inf") && img->lookup("/SNC/meta.inf")->name == "meta.inf");
+    CHECK(img->lookup("/SNC/../SNC/./App.so") && img->lookup("/SNC/../SNC/./App.so")->size == app.size());
     CHECK(img->read_file("/SNC/meta.inf") == meta);
     CHECK(img->read_file("/SNC/A Rather Long File Name.txt") == longf);
     CHECK(img->read_file("/SNC/EMPTY.BIN") == std::vector<uint8_t>{});
@@ -254,7 +257,7 @@ void test_fat(didj::fs::FatType type, uint32_t clusters, uint32_t lead_in) {
     CHECK(!img->read_file("/README.TXT/x"));
 
     // Partial read across a fragmented cluster boundary.
-    auto e = img->stat("/SNC/App.so");
+    auto e = img->lookup("/SNC/App.so");
     std::vector<uint8_t> part(1000);
     CHECK(img->read(*e, 300, part.data(), part.size()) == part.size());
     CHECK(std::equal(part.begin(), part.end(), app.begin() + 300));
@@ -262,6 +265,161 @@ void test_fat(didj::fs::FatType type, uint32_t clusters, uint32_t lead_in) {
 
     img.reset();
     std::filesystem::remove(path);
+}
+
+// --- inflate ---
+
+#include "inflate_vectors.inc"
+
+void test_inflate() {
+    std::string fixed_text;
+    for (int i = 0; i < 6; ++i) fixed_text += "The LeapFrog Didj ran Linux 2.6.20 on an LF1000. ";
+    for (int i = 0; i < 256; ++i) fixed_text += char(i);
+
+    std::vector<uint8_t> out;
+    CHECK(didj::util::inflate_zlib(kZlibFixed, sizeof kZlibFixed, out, 1 << 20));
+    CHECK(std::string(out.begin(), out.end()) == fixed_text);
+
+    out.clear();
+    CHECK(didj::util::inflate_zlib(kZlibDynamic, sizeof kZlibDynamic, out, 1 << 20));  // Adler-32 checked inside
+    CHECK(out.size() == 3000);
+
+    out.clear();
+    CHECK(!didj::util::inflate_zlib(kZlibDynamic, sizeof kZlibDynamic, out, 100));  // output limit enforced
+    out.clear();
+    CHECK(!didj::util::inflate_zlib(kZlibDynamic, sizeof kZlibDynamic - 10, out, 1 << 20));  // truncated
+
+    // Stored block, raw deflate.
+    const uint8_t stored[] = {0x01, 0x03, 0x00, 0xfc, 0xff, 'a', 'b', 'c'};
+    out.clear();
+    CHECK(didj::util::inflate_raw(stored, sizeof stored, out, 16));
+    CHECK(std::string(out.begin(), out.end()) == "abc");
+
+    // Linux crc32_le(0, "123456789") as used by JFFS2 (no pre/post inversion).
+    const uint8_t digits[] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
+    CHECK(~didj::util::crc32_raw(~0u, digits, 9) == 0xCBF43926u);  // standard CRC-32 check value
+}
+
+// --- JFFS2 ---
+
+class Jffs2Builder {
+public:
+    void dirent(uint32_t pino, uint32_t version, uint32_t ino, uint8_t type, const std::string& name) {
+        std::vector<uint8_t> n(40 + name.size(), 0);
+        header(n, 0xE001);
+        put32(n, 12, pino);
+        put32(n, 16, version);
+        put32(n, 20, ino);
+        n[28] = uint8_t(name.size());
+        n[29] = type;
+        put32(n, 32, didj::util::crc32_raw(0, n.data(), 32));
+        std::memcpy(&n[40], name.data(), name.size());
+        put32(n, 36, didj::util::crc32_raw(0, &n[40], name.size()));
+        append(n);
+    }
+
+    void inode(uint32_t ino, uint32_t version, uint32_t mode, uint32_t isize, uint32_t offset,
+               const std::vector<uint8_t>& payload, uint32_t dsize, uint8_t compr) {
+        std::vector<uint8_t> n(68 + payload.size(), 0);
+        header(n, 0xE002);
+        put32(n, 12, ino);
+        put32(n, 16, version);
+        put32(n, 20, mode);
+        put32(n, 28, isize);
+        put32(n, 44, offset);
+        put32(n, 48, uint32_t(payload.size()));
+        put32(n, 52, dsize);
+        n[56] = compr;
+        std::memcpy(&n[68], payload.data(), payload.size());
+        put32(n, 60, didj::util::crc32_raw(0, payload.data(), payload.size()));
+        put32(n, 64, didj::util::crc32_raw(0, n.data(), 60));
+        append(n);
+    }
+
+    void raw(const std::vector<uint8_t>& bytes) { img_.insert(img_.end(), bytes.begin(), bytes.end()); }
+    std::vector<uint8_t> take() { return std::move(img_); }
+
+private:
+    void header(std::vector<uint8_t>& n, uint16_t type) {
+        put16(n, 0, 0x1985);
+        put16(n, 2, type);
+        put32(n, 4, uint32_t(n.size()));
+        put32(n, 8, didj::util::crc32_raw(0, n.data(), 8));
+    }
+    void append(std::vector<uint8_t> n) {
+        while (n.size() % 4) n.push_back(0xFF);
+        raw(n);
+    }
+    std::vector<uint8_t> img_;
+};
+
+std::vector<uint8_t> bytes_of(const std::string& s) { return std::vector<uint8_t>(s.begin(), s.end()); }
+
+void test_jffs2() {
+    Jffs2Builder b;
+    b.raw(std::vector<uint8_t>(16, 0xFF));  // erased flash before the first node
+    b.inode(1, 1, 040755, 0, 0, {}, 0, 0);
+    b.dirent(1, 1, 2, 4, "lib");
+    b.inode(2, 1, 040755, 0, 0, {}, 0, 0);
+
+    // A file written in two nodes, the second one zlib-compressed.
+    b.dirent(2, 1, 3, 8, "libz.so.1.2.3");
+    b.inode(3, 1, 0100755, 4, 0, bytes_of("\x7f" "ELF"), 4, 0);
+    std::vector<uint8_t> fixed_text(kZlibFixed, kZlibFixed + sizeof kZlibFixed);
+    b.inode(3, 2, 0100755, 4 + 550, 4, fixed_text, 550, 6);
+
+    // Symlinks, relative and absolute.
+    b.dirent(2, 2, 4, 10, "libz.so");
+    b.inode(4, 1, 0120777, 13, 0, bytes_of("libz.so.1.2.3"), 13, 0);
+    b.dirent(1, 2, 5, 10, "usrlib");
+    b.inode(5, 1, 0120777, 4, 0, bytes_of("/lib"), 4, 0);
+
+    // A file rewritten, then truncated by a newer data-less node, then deleted
+    // and recreated under the same name with a new inode.
+    b.dirent(1, 3, 6, 8, "settings.cfg");
+    b.inode(6, 1, 0100644, 11, 0, bytes_of("hello world"), 11, 0);
+    b.inode(6, 2, 0100644, 5, 0, {}, 0, 0);
+    b.dirent(1, 4, 0, 8, "settings.cfg");
+    b.dirent(1, 5, 7, 8, "settings.cfg");
+    b.inode(7, 1, 0100600, 3, 0, {}, 0, 0);
+    b.inode(7, 2, 0100600, 3, 0, std::vector<uint8_t>{0}, 3, 1);  // ZERO compression
+
+    // An entry deleted for good, and a node with a corrupt header CRC.
+    b.dirent(1, 6, 8, 8, "gone");
+    b.dirent(1, 7, 0, 8, "gone");
+    std::vector<uint8_t> bad = {0x85, 0x19, 0x01, 0xE0, 0x0c, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef};
+    b.raw(bad);
+
+    // A character device: /dev/fb0 is (29, 0), stored old-style in 2 bytes.
+    b.dirent(1, 8, 9, 2, "fb0");
+    b.inode(9, 1, 020660, 2, 0, std::vector<uint8_t>{0x00, 29}, 2, 0);
+
+    std::string err;
+    auto fs = didj::fs::Jffs2Image::from_bytes(b.take(), &err);
+    CHECK(fs != nullptr);
+    if (!fs) return;
+    CHECK(fs->bad_nodes() == 1);
+
+    auto lib = fs->read_file("/lib/libz.so.1.2.3");
+    CHECK(lib && lib->size() == 554);
+    CHECK(lib && std::memcmp(lib->data(), "\x7f" "ELF" "The LeapFrog", 16) == 0);
+    CHECK(fs->read_file("/lib/libz.so") == lib);
+    CHECK(fs->read_file("/usrlib/libz.so") == lib);
+    CHECK(fs->read_file("usrlib/../lib/libz.so") == lib);
+    auto link = fs->lookup("/lib/libz.so", /*follow_last=*/false);
+    CHECK(link && link->type == didj::fs::NodeType::Symlink && fs->readlink(*link) == "libz.so.1.2.3");
+    CHECK(!fs->lookup("/LIB/libz.so"));  // JFFS2 is case-sensitive
+
+    auto cfg = fs->read_file("/settings.cfg");
+    CHECK(cfg && *cfg == std::vector<uint8_t>(3, 0));
+    CHECK(fs->lookup("/settings.cfg")->mode == 0100600);
+    CHECK(!fs->lookup("/gone"));
+
+    auto fb = fs->lookup("/fb0");
+    CHECK(fb && fb->type == didj::fs::NodeType::CharDevice && fb->rdev == (29u << 8));
+
+    auto root = fs->list("/");
+    CHECK(root && root->size() == 4);  // lib, usrlib, settings.cfg, fb0
 }
 
 void test_metainf() {
@@ -352,6 +510,8 @@ int main() {
     test_fat(didj::fs::FatType::Fat16, 5000, 0);
     test_fat(didj::fs::FatType::Fat32, 70000, 0);
     test_fat(didj::fs::FatType::Fat16, 5000, 63 * 512);
+    test_inflate();
+    test_jffs2();
     test_metainf();
     test_elf();
     if (g_failures) {

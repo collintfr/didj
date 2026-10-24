@@ -27,13 +27,6 @@ std::string trim_right(std::string s) {
     return s;
 }
 
-bool iequals(std::string_view a, std::string_view b) {
-    if (a.size() != b.size()) return false;
-    for (size_t i = 0; i < a.size(); ++i)
-        if (std::tolower((unsigned char)a[i]) != std::tolower((unsigned char)b[i])) return false;
-    return true;
-}
-
 // Appends one UCS-2 code unit as UTF-8.
 void append_utf8(std::string& out, uint16_t c) {
     if (c < 0x80) {
@@ -52,19 +45,6 @@ uint8_t lfn_checksum(const uint8_t* short_name) {
     uint8_t sum = 0;
     for (int i = 0; i < 11; ++i) sum = uint8_t(((sum & 1) << 7) + (sum >> 1) + short_name[i]);
     return sum;
-}
-
-std::vector<std::string_view> split_path(std::string_view path) {
-    std::vector<std::string_view> parts;
-    size_t i = 0;
-    while (i < path.size()) {
-        while (i < path.size() && path[i] == '/') ++i;
-        size_t j = i;
-        while (j < path.size() && path[j] != '/') ++j;
-        if (j > i) parts.push_back(path.substr(i, j - i));
-        i = j;
-    }
-    return parts;
 }
 
 }  // namespace
@@ -152,9 +132,9 @@ bool FatImage::init(std::string* err) {
     if (!read_raw(fat_offset_, fat_.data(), fat_.size())) return fail("cannot read FAT");
 
     // Prefer the volume label stored in the root directory, as mlabel/dosfslabel do.
-    std::vector<uint8_t> root = read_dir_bytes(root_entry());
-    for (size_t off = 0; off + 32 <= root.size(); off += 32) {
-        const uint8_t* e = &root[off];
+    std::vector<uint8_t> root_dir = read_dir_bytes(root());
+    for (size_t off = 0; off + 32 <= root_dir.size(); off += 32) {
+        const uint8_t* e = &root_dir[off];
         if (e[0] == 0x00) break;
         if (e[0] == 0xE5 || e[11] == 0x0F) continue;
         if (e[11] & 0x08) {
@@ -213,23 +193,28 @@ uint64_t FatImage::cluster_offset(uint32_t cluster) const {
     return data_offset_ + uint64_t(cluster - 2) * bytes_per_cluster_;
 }
 
-DirEntry FatImage::root_entry() const {
-    DirEntry d;
+std::string FatImage::describe() const {
+    return std::string(fat_type_name(type_)) + " volume '" + label_ + "'";
+}
+
+Entry FatImage::root() {
+    Entry d;
     d.name = "/";
-    d.is_dir = true;
-    d.first_cluster = type_ == FatType::Fat32 ? root_cluster_ : 0;
+    d.type = NodeType::Dir;
+    d.mode = 040755;
+    d.id = type_ == FatType::Fat32 ? root_cluster_ : 0;
     return d;
 }
 
-std::vector<uint8_t> FatImage::read_dir_bytes(const DirEntry& dir) {
+std::vector<uint8_t> FatImage::read_dir_bytes(const Entry& dir) {
     std::vector<uint8_t> out;
-    if (dir.first_cluster == 0) {
+    if (dir.id == 0) {
         if (type_ == FatType::Fat32) return out;
         out.resize(root_dir_bytes_);
         if (!read_raw(root_dir_offset_, out.data(), out.size())) out.clear();
         return out;
     }
-    const auto& c = chain(dir.first_cluster);
+    const auto& c = chain(uint32_t(dir.id));
     out.resize(c.size() * size_t(bytes_per_cluster_));
     for (size_t i = 0; i < c.size(); ++i) {
         if (!read_raw(cluster_offset(c[i]), &out[i * bytes_per_cluster_], bytes_per_cluster_)) {
@@ -240,8 +225,8 @@ std::vector<uint8_t> FatImage::read_dir_bytes(const DirEntry& dir) {
     return out;
 }
 
-std::vector<DirEntry> FatImage::list(const DirEntry& dir) {
-    std::vector<DirEntry> entries;
+std::vector<Entry> FatImage::list(const Entry& dir) {
+    std::vector<Entry> entries;
     std::vector<uint8_t> raw = read_dir_bytes(dir);
 
     std::vector<uint16_t> lfn;  // accumulated long-name code units, in order
@@ -277,13 +262,13 @@ std::vector<DirEntry> FatImage::list(const DirEntry& dir) {
             continue;
         }
 
-        DirEntry d;
+        Entry d;
         uint8_t name83[11];
         std::memcpy(name83, e, 11);
         if (name83[0] == 0x05) name83[0] = 0xE5;
         std::string base = trim_right(std::string(reinterpret_cast<char*>(name83), 8));
         std::string ext = trim_right(std::string(reinterpret_cast<char*>(name83) + 8, 3));
-        d.short_name = ext.empty() ? base : base + "." + ext;
+        std::string short_name = ext.empty() ? base : base + "." + ext;
 
         bool have_lfn = !lfn.empty() && lfn_expected == 0 && lfn_sum == lfn_checksum(e);
         if (have_lfn) {
@@ -301,42 +286,22 @@ std::vector<DirEntry> FatImage::list(const DirEntry& dir) {
         lfn.clear();
         lfn_expected = 0;
 
-        d.is_dir = attr & 0x10;
-        d.first_cluster = (type_ == FatType::Fat32 ? uint32_t(le16(e + 20)) << 16 : 0) | le16(e + 26);
-        d.size = d.is_dir ? 0 : le32(e + 28);
+        if (d.name != short_name) d.alt_name = std::move(short_name);
+        bool is_dir = attr & 0x10;
+        d.type = is_dir ? NodeType::Dir : NodeType::File;
+        d.mode = is_dir ? 040755 : 0100644;
+        d.id = (type_ == FatType::Fat32 ? uint32_t(le16(e + 20)) << 16 : 0) | le16(e + 26);
+        d.size = is_dir ? 0 : le32(e + 28);
         if (d.name == "." || d.name == "..") continue;
         entries.push_back(std::move(d));
     }
     return entries;
 }
 
-std::optional<DirEntry> FatImage::stat(std::string_view path) {
-    DirEntry cur = root_entry();
-    for (std::string_view part : split_path(path)) {
-        if (!cur.is_dir) return std::nullopt;
-        bool found = false;
-        for (auto& e : list(cur)) {
-            if (iequals(e.name, part) || iequals(e.short_name, part)) {
-                cur = std::move(e);
-                found = true;
-                break;
-            }
-        }
-        if (!found) return std::nullopt;
-    }
-    return cur;
-}
-
-std::optional<std::vector<DirEntry>> FatImage::list(std::string_view path) {
-    auto d = stat(path);
-    if (!d || !d->is_dir) return std::nullopt;
-    return list(*d);
-}
-
-size_t FatImage::read(const DirEntry& file, uint64_t offset, void* buf, size_t len) {
-    if (file.is_dir || offset >= file.size || !file.first_cluster) return 0;
+size_t FatImage::read(const Entry& file, uint64_t offset, void* buf, size_t len) {
+    if (file.type != NodeType::File || offset >= file.size || !file.id) return 0;
     len = size_t(std::min<uint64_t>(len, file.size - offset));
-    const auto& c = chain(file.first_cluster);
+    const auto& c = chain(uint32_t(file.id));
     auto* out = static_cast<uint8_t*>(buf);
     size_t done = 0;
     while (done < len) {
@@ -355,14 +320,6 @@ size_t FatImage::read(const DirEntry& file, uint64_t offset, void* buf, size_t l
         done += n;
     }
     return done;
-}
-
-std::optional<std::vector<uint8_t>> FatImage::read_file(std::string_view path) {
-    auto d = stat(path);
-    if (!d || d->is_dir) return std::nullopt;
-    std::vector<uint8_t> data(d->size);
-    if (read(*d, 0, data.data(), data.size()) != data.size()) return std::nullopt;
-    return data;
 }
 
 }  // namespace didj::fs
