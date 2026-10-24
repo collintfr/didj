@@ -6,6 +6,7 @@
 // results are the same on every host.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
