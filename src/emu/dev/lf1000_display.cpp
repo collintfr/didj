@@ -1,5 +1,6 @@
 #include "emu/dev/lf1000_display.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <set>

@@ -1,5 +1,6 @@
 #include "emu/dev/input.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 

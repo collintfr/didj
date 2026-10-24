@@ -1,5 +1,6 @@
 #include "emu/dev/board.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include "emu/linux_abi.h"

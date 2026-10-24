@@ -1,5 +1,6 @@
 #include "util/png.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <vector>
 

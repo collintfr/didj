@@ -1,5 +1,6 @@
 #include "emu/process.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <thread>

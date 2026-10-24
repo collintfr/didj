@@ -1,5 +1,6 @@
 #include "emu/syscalls.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>

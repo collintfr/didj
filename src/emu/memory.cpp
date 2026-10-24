@@ -1,5 +1,6 @@
 #include "emu/memory.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <unicorn/unicorn.h>

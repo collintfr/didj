@@ -1,5 +1,6 @@
 #include "emu/dev/basic.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <random>

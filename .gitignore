@@ -5,3 +5,6 @@
 .vs/
 .vscode/
 /didj-data/
+.devenv/
+.devenv.flake.nix
+.direnv/

@@ -38,6 +38,20 @@ It needs `curl`, which comes with Windows 10 and later and with every Linux dist
 
 [docs/dumps.md](docs/dumps.md) has the checksums and more about each image.
 
+## Quick start with devenv (Linux)
+
+With [devenv](https://devenv.sh) installed, everything else (compiler, CMake, SDL2) comes from Nix:
+
+```sh
+devenv shell        # enter the environment
+didj-build          # build into ./build
+didj-dumps          # download and verify the dumps (or: didj-dumps os SNC)
+didj-play --cart SNC
+didj-test           # unit tests
+```
+
+Each also works without entering the shell, for example `devenv shell didj-play --cart SNC`. `didj-dumps` and `didj-play` build first if needed, and take the same arguments as `didj-fetch` and `didj`.
+
 ## Building
 
 You need CMake 3.16+ and a C++17 compiler: GCC, Clang or MSVC. The window uses SDL2: the system's if CMake finds it (on Debian and Ubuntu, `apt install libsdl2-dev`), otherwise the build downloads and compiles it.

@@ -1,5 +1,6 @@
 #include "emu/loader.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include "emu/memory.h"
