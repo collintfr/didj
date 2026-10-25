@@ -29,6 +29,16 @@ std::deque<std::string> split(const std::string& path) {
     return parts;
 }
 
+// Where rel (a mount-relative guest path) lives in an overlay directory.
+// False if there is no overlay, or if rel holds a character Windows reads as
+// a separator, drive or stream ('\\', ':'): such names are refused on every
+// host, so a guest path cannot name a host file outside the overlay.
+bool host_path(const stdfs::path& overlay, const std::string& rel, stdfs::path& out) {
+    if (overlay.empty() || rel.find_first_of("\\:") != std::string::npos) return false;
+    out = rel.empty() ? overlay : overlay / stdfs::u8path(rel);
+    return true;
+}
+
 std::string join_components(const std::vector<std::string>& comps) {
     std::string s;
     for (const auto& c : comps) s += "/" + c;
@@ -297,8 +307,8 @@ Vfs::Node Vfs::node_at_layers(const std::string& canonical) {
     n.mount = mount_for(canonical, n.rel);
     if (!n.mount) return n;
     Mount& m = *n.mount;
-    if (!m.overlay.empty()) {
-        stdfs::path host = n.rel.empty() ? m.overlay : m.overlay / stdfs::u8path(n.rel);
+    stdfs::path host;
+    if (host_path(m.overlay, n.rel, host)) {
         std::error_code ec;
         auto st = stdfs::symlink_status(host, ec);
         bool exists = !ec && st.type() != stdfs::file_type::not_found;
@@ -411,8 +421,8 @@ std::vector<DirItem> Vfs::list_dir(const std::string& canonical, const Node& n) 
             items[e.name] = DirItem{e.id ? e.id : path_ino(rel), dirent_type(e.type), e.name};
         }
     }
-    if (n.mount && !n.mount->overlay.empty()) {
-        stdfs::path dir = n.rel.empty() ? n.mount->overlay : n.mount->overlay / stdfs::u8path(n.rel);
+    stdfs::path dir;
+    if (n.mount && host_path(n.mount->overlay, n.rel, dir)) {
         std::error_code ec;
         for (stdfs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
             std::string name = it->path().filename().u8string();
@@ -440,7 +450,8 @@ std::vector<DirItem> Vfs::list_dir(const std::string& canonical, const Node& n) 
 int Vfs::copy_up(Node& n) {
     if (n.kind == Node::Host) return 0;
     if (!n.mount || n.mount->overlay.empty()) return -kEROFS;
-    stdfs::path host = n.mount->overlay / stdfs::u8path(n.rel);
+    stdfs::path host;
+    if (!host_path(n.mount->overlay, n.rel, host)) return -kEINVAL;
     std::error_code ec;
     stdfs::create_directories(host.parent_path(), ec);
     if (ec) return -kEIO;
@@ -473,8 +484,9 @@ int Vfs::open(const std::string& cwd, const std::string& path, uint32_t flags, u
         if (pn.kind == Node::Missing) return -kENOENT;
         if (pn.type != fs::NodeType::Dir) return -kENOTDIR;
         if (!n.mount || n.mount->overlay.empty()) return -kEROFS;
+        stdfs::path host;
+        if (!host_path(n.mount->overlay, n.rel, host)) return -kEINVAL;
         n.mount->whiteouts.erase(n.rel);
-        stdfs::path host = n.mount->overlay / stdfs::u8path(n.rel);
         std::error_code ec;
         stdfs::create_directories(host.parent_path(), ec);
         std::FILE* f = std::fopen(host.u8string().c_str(), "w+b");
@@ -586,9 +598,11 @@ int Vfs::mkdir(const std::string& cwd, const std::string& path) {
     Node pn = node_at(parent.empty() ? "/" : parent);
     if (pn.kind == Node::Missing) return -kENOENT;
     if (!n.mount || n.mount->overlay.empty()) return -kEROFS;
+    stdfs::path host;
+    if (!host_path(n.mount->overlay, n.rel, host)) return -kEINVAL;
     n.mount->whiteouts.erase(n.rel);
     std::error_code ec;
-    stdfs::create_directories(n.mount->overlay / stdfs::u8path(n.rel), ec);
+    stdfs::create_directories(host, ec);
     return ec ? -kEIO : 0;
 }
 
@@ -617,8 +631,10 @@ int Vfs::rmdir(const std::string& cwd, const std::string& path) {
     if (n.type != fs::NodeType::Dir) return -kENOTDIR;
     if (list_dir(canon, n).size() > 2) return -kENOTEMPTY;
     if (!n.mount || n.mount->overlay.empty()) return -kEROFS;
+    stdfs::path host;
+    if (!host_path(n.mount->overlay, n.rel, host)) return -kEINVAL;
     std::error_code ec;
-    stdfs::remove(n.mount->overlay / stdfs::u8path(n.rel), ec);
+    stdfs::remove(host, ec);
     if (n.mount->image && image_entry(*n.mount, n.rel)) n.mount->whiteouts.insert(n.rel);
     return 0;
 }
@@ -633,9 +649,10 @@ int Vfs::rename(const std::string& cwd, const std::string& from, const std::stri
     if (sn.kind == Node::Missing) return -kENOENT;
     if (sn.type == fs::NodeType::Dir) return -kEXDEV;  // directory renames are not needed by the Didj software
     if (sn.mount != dn.mount || !dn.mount || dn.mount->overlay.empty()) return -kEXDEV;
+    stdfs::path target;
+    if (!host_path(dn.mount->overlay, dn.rel, target)) return -kEINVAL;
     r = copy_up(sn);
     if (r < 0) return r;
-    stdfs::path target = dn.mount->overlay / stdfs::u8path(dn.rel);
     std::error_code ec;
     stdfs::create_directories(target.parent_path(), ec);
     stdfs::rename(sn.host, target, ec);

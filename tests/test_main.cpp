@@ -557,6 +557,46 @@ void test_zip() {
     CHECK(!zip.open(std::vector<uint8_t>(30), &err));
 }
 
+void test_zip_extract_names() {
+    // Entries that could land outside the target directory are skipped (open()
+    // turns '\\' into '/', so Windows-style "..\\" is caught too).
+    const std::vector<std::string> names = {"POW/meta.inf", "POW/../up", "POW\\..\\..\\up", "C:up", "/up"};
+    std::vector<uint8_t> z;
+    auto u16 = [&](uint32_t v) { z.push_back(uint8_t(v)), z.push_back(uint8_t(v >> 8)); };
+    auto u32 = [&](uint32_t v) { u16(v & 0xffff), u16(v >> 16); };
+    auto str = [&](const std::string& t) { z.insert(z.end(), t.begin(), t.end()); };
+    std::vector<uint32_t> offsets;
+    for (const auto& n : names) {
+        offsets.push_back(uint32_t(z.size()));
+        u32(0x04034b50), u16(10), u16(0), u16(0), u16(0), u16(0), u32(0), u32(0), u32(0),
+            u16(uint32_t(n.size())), u16(0), str(n);
+    }
+    const uint32_t cd = uint32_t(z.size());
+    for (size_t i = 0; i < names.size(); ++i)
+        u32(0x02014b50), u16(20), u16(10), u16(0), u16(0), u16(0), u16(0), u32(0), u32(0), u32(0),
+            u16(uint32_t(names[i].size())), u16(0), u16(0), u16(0), u16(0), u32(0), u32(offsets[i]), str(names[i]);
+    const uint32_t cd_size = uint32_t(z.size()) - cd;
+    u32(0x06054b50), u16(0), u16(0), u16(uint32_t(names.size())), u16(uint32_t(names.size())), u32(cd_size), u32(cd),
+        u16(0);
+
+    didj::pkg::ZipArchive zip;
+    std::string err;
+    CHECK(zip.open(z, &err));
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / "didj_zip_test";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    const fs::path dir = root / "a" / "b";
+    CHECK(zip.extract_all(dir, &err));
+    CHECK(fs::is_regular_file(dir / "POW" / "meta.inf"));
+    size_t files = 0;
+    for (auto it = fs::recursive_directory_iterator(root, ec); !ec && it != fs::recursive_directory_iterator();
+         it.increment(ec))
+        files += it->is_regular_file();
+    CHECK(files == 1);
+    fs::remove_all(root, ec);
+}
+
 }  // namespace
 
 int main() {
@@ -570,6 +610,7 @@ int main() {
     test_elf();
     test_md5();
     test_zip();
+    test_zip_extract_names();
     if (g_failures) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);
         return 1;

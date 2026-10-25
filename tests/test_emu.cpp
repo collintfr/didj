@@ -1,5 +1,6 @@
 // Tests for the CPU and guest memory layer, using hand-assembled ARM code.
 #include <atomic>
+#include <filesystem>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -14,7 +15,9 @@
 #include "emu/hle/gles.h"
 #include "emu/hle/raster.h"
 #include "emu/hle/stub_elf.h"
+#include "emu/linux_abi.h"
 #include "emu/memory.h"
+#include "emu/vfs.h"
 
 namespace {
 
@@ -383,6 +386,27 @@ void test_video_priority() {
 
 }  // namespace
 
+void test_vfs_host_names() {
+    // Guest names Windows would read as a separator or drive are refused on
+    // every host, so writes stay in the overlay.
+    namespace stdfs = std::filesystem;
+    const stdfs::path root = stdfs::temp_directory_path() / "didj_vfs_test";
+    std::error_code ec;
+    stdfs::remove_all(root, ec);
+    Vfs vfs;
+    vfs.mount_host("/tmp", root / "tmp");
+    std::shared_ptr<OpenFile> f;
+    CHECK(vfs.open("/", "/tmp/ok", lx::kO_CREAT | lx::kO_RDWR, 0644, f) == 0);
+    f.reset();
+    CHECK(stdfs::is_regular_file(root / "tmp" / "ok"));
+    CHECK(vfs.open("/", "/tmp/a\\..\\..\\escaped", lx::kO_CREAT | lx::kO_RDWR, 0644, f) == -lx::kEINVAL);
+    CHECK(vfs.open("/", "/tmp/C:x", lx::kO_CREAT | lx::kO_RDWR, 0644, f) == -lx::kEINVAL);
+    CHECK(vfs.mkdir("/", "/tmp/d\\..\\..\\escaped") == -lx::kEINVAL);
+    CHECK(vfs.rename("/", "/tmp/ok", "/tmp/..\\..\\escaped") == -lx::kEINVAL);
+    CHECK(!stdfs::exists(root / "escaped") && !stdfs::exists(root.parent_path() / "escaped"));
+    stdfs::remove_all(root, ec);
+}
+
 int main() {
     test_svc();
     test_thumb();
@@ -393,6 +417,7 @@ int main() {
     test_stub_library();
     test_raster();
     test_video_priority();
+    test_vfs_host_names();
     if (g_failures) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);
         return 1;

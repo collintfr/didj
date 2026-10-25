@@ -91,7 +91,16 @@ bool extract_entry(FileSystem& img, const Entry& e, const std::filesystem::path&
     if (e.is_dir()) {
         std::filesystem::create_directories(out);
         bool ok = true;
-        for (const auto& child : img.list(e)) ok &= extract_entry(img, child, out / child.name);
+        for (const auto& child : img.list(e)) {
+            // A name the host would read as more than one path component
+            // could land outside OUTDIR.
+            if (child.name.empty() || child.name == "." || child.name == ".." ||
+                child.name.find_first_of("/\\:") != std::string::npos) {
+                std::fprintf(stderr, "didjtool: skipping unsafe name %s\n", child.name.c_str());
+                continue;
+            }
+            ok &= extract_entry(img, child, out / std::filesystem::u8path(child.name));
+        }
         return ok;
     }
     std::vector<uint8_t> buf = img.read_all(e);

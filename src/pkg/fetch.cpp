@@ -57,6 +57,13 @@ std::wstring quote_arg(const std::wstring& a) {
 // Returns true if it exits with status 0.
 bool run_curl(const std::vector<std::string>& args, const FetchOptions& opt) {
 #ifdef _WIN32
+    // The curl.exe Windows ships in System32, by full path: a bare "curl" is
+    // looked up in didj.exe's folder and the current directory first, where
+    // anyone could have put a curl.exe.
+    wchar_t sys[MAX_PATH];
+    UINT len = GetSystemDirectoryW(sys, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) return false;
+    std::wstring exe = std::wstring(sys, len) + L"\\curl.exe";
     std::wstring cmd = L"curl";
     for (const auto& a : args) cmd += L" " + quote_arg(widen(a));
     STARTUPINFOW si{};
@@ -65,7 +72,7 @@ bool run_curl(const std::vector<std::string>& args, const FetchOptions& opt) {
     // Without a console of our own (the windowed front end), keep curl from
     // opening one.
     DWORD flags = opt.show_progress ? 0 : CREATE_NO_WINDOW;
-    if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, flags, nullptr, nullptr, &si, &pi))
+    if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, flags, nullptr, nullptr, &si, &pi))
         return false;
     CloseHandle(pi.hThread);
     while (WaitForSingleObject(pi.hProcess, 100) == WAIT_TIMEOUT) {
